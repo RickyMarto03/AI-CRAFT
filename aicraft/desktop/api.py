@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as dt
+import difflib
 import functools
 import logging
 import shutil
@@ -23,15 +24,16 @@ from pathlib import Path
 
 from sqlalchemy import func, or_
 
-from .. import backlog, backup, config, reporting, scheduler
+from .. import backlog, backup, config, profile_tracking, reporting, scheduler
 from ..budget import estimate as budget_estimate
 from ..budget import ledger as budget_ledger
 from ..budget import sync as budget_sync
 from ..budget.errors import BudgetInsufficientError
 from ..db.base import SessionLocal, init_db
 from ..db.models import (
-    CharacterVersion, ContentPiece, ContentPieceEvent, CreditLedger,
-    ImprovementNote, PlanWeek, Profile, ReferenceItem,
+    CharacterVersion, ContentPiece, ContentPieceEvent, CreativeRule, CreditLedger,
+    GenerationPrompt, ImprovementNote, PlanTemplate, PlanTemplateItem,
+    PlanWeek, Profile, ReferenceItem,
 )
 from ..planning import plan as planning
 from ..planning.quota import GIORNI_VALIDI
@@ -186,6 +188,9 @@ def _list_references(session, *, status=None, category=None, search=None, limit=
             "download_attempts": r.download_attempts or 0,
             "max_download_attempts": reference_sync.MAX_DOWNLOAD_ATTEMPTS,
             "retryable": r.status in _ERROR_STATUSES and (r.download_attempts or 0) < reference_sync.MAX_DOWNLOAD_ATTEMPTS,
+            "quarantined": bool(r.quarantined),
+            "quarantine_reason": r.quarantine_reason,
+            "expires_in_days": (r.week_end - dt.date.today()).days if r.week_end else None,
         })
     return {"items": items, "total": total, "offset": offset, "limit": limit}
 
@@ -386,6 +391,7 @@ def _reference_stats(session) -> dict:
         "error": error_total,
         "error_retryable": error_retryable,
         "too_old": too_old,
+        "quarantined": by_status.get("quarantined", 0) or sum(1 for r in rows if r.quarantined),
         "retention_days": config.REFERENCE_RETENTION_DAYS,
         "selection_weeks": config.REFERENCE_SELECTION_WEEKS,
         "latest": [
@@ -421,7 +427,7 @@ def _production_preview(session, plan_id=None) -> dict:
     )
     if plan_id is not None:
         q = q.filter(ContentPiece.plan_week_id == int(plan_id))
-    pieces = q.all()
+    pieces = q.order_by(ContentPiece.priority.desc(), ContentPiece.id).all()
     cache: dict = {}
     stima = 0.0
     by_type: dict = {}
@@ -445,6 +451,41 @@ def _production_preview(session, plan_id=None) -> dict:
         "balance": balance,
         "covers": balance >= stima,
         "pieces": piece_rows,
+    }
+
+
+def _apply_production_limits(preview: dict, *, max_pieces=None, max_credits=None) -> dict:
+    pieces = list(preview.get("pieces") or [])
+    selected = pieces
+    skipped = 0
+    if max_pieces is not None and int(max_pieces) > 0:
+        limit = int(max_pieces)
+        skipped += max(0, len(selected) - limit)
+        selected = selected[:limit]
+    if max_credits is not None and float(max_credits) > 0:
+        credit_limit = float(max_credits)
+        under_credit = []
+        total = 0.0
+        for piece in selected:
+            estimate = float(piece.get("estimated_cost") or 0.0)
+            if under_credit and total + estimate > credit_limit:
+                skipped += 1
+                continue
+            if not under_credit and estimate > credit_limit:
+                skipped += 1
+                continue
+            under_credit.append(piece)
+            total += estimate
+        selected = under_credit
+    estimated = sum(float(p.get("estimated_cost") or 0.0) for p in selected)
+    return {
+        "ready_before_limits": len(pieces),
+        "ready_count": len(selected),
+        "skipped_by_limit": skipped,
+        "estimated_cost": estimated,
+        "balance": preview.get("balance"),
+        "covers": (preview.get("balance") or 0.0) >= estimated,
+        "pieces": selected,
     }
 
 
@@ -542,9 +583,8 @@ def _today_events(session) -> list:
     profilo attivo, solo cosa e' PIANIFICATO), questa e' una console di cosa
     e' successo DAVVERO oggi, utile mentre una produzione lunga gira in
     background. Richiesto dall'utente (15/07/2026)."""
-    today = dt.date.today()
-    start = dt.datetime.combine(today, dt.time.min)
-    end = dt.datetime.combine(today, dt.time.max)
+    end = dt.datetime.utcnow() + dt.timedelta(minutes=1)
+    start = end - dt.timedelta(hours=24)
     events = (
         session.query(ContentPieceEvent)
         .filter(ContentPieceEvent.timestamp >= start, ContentPieceEvent.timestamp <= end)
@@ -617,10 +657,14 @@ def _scheduler_status() -> dict:
         }
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{scheduler.DEFAULT_LABEL}.plist"
+    tracking_plist_path = Path.home() / "Library" / "LaunchAgents" / f"{scheduler.TRACKING_LABEL}.plist"
     return {
         "installed": plist_path.exists(),
+        "tracking_installed": tracking_plist_path.exists(),
         "out": _info(log_dir / "weekly-reference-sync.out.log"),
         "err": _info(log_dir / "weekly-reference-sync.err.log"),
+        "tracking_out": _info(log_dir / "daily-profile-tracking.out.log"),
+        "tracking_err": _info(log_dir / "daily-profile-tracking.err.log"),
     }
 
 
@@ -664,6 +708,228 @@ def _health_check() -> dict:
     }
 
 
+def _reference_stock(session) -> dict:
+    rows = session.query(ReferenceItem).filter(ReferenceItem.status == "ready", ReferenceItem.quarantined.is_(False)).all()
+    by_category: dict = {}
+    for r in rows:
+        key = r.source_category or "—"
+        by_category[key] = by_category.get(key, 0) + 1
+    return {"total_ready": len(rows), "by_category": dict(sorted(by_category.items()))}
+
+
+def _reference_expiring(session, *, days: int = 10, limit: int = 30) -> list:
+    today = dt.date.today()
+    cutoff = today + dt.timedelta(days=days)
+    rows = (
+        session.query(ReferenceItem)
+        .filter(
+            ReferenceItem.status == "ready",
+            ReferenceItem.week_end.is_not(None),
+            ReferenceItem.week_end <= cutoff,
+            ReferenceItem.quarantined.is_(False),
+        )
+        .order_by(ReferenceItem.week_end, ReferenceItem.id)
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "category": r.source_category,
+            "week_end": r.week_end.isoformat() if r.week_end else None,
+            "days_left": (r.week_end - today).days if r.week_end else None,
+            "caption": (r.original_caption or "")[:100],
+        }
+        for r in rows
+    ]
+
+
+def _plan_mix_warnings(session, plan_id: int) -> list:
+    plan = session.get(PlanWeek, plan_id)
+    if plan is None:
+        return []
+    pieces = session.query(ContentPiece).filter(ContentPiece.plan_week_id == plan.id).all()
+    by_type: dict = {}
+    by_day: dict = {}
+    for p in pieces:
+        by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
+        by_day[p.scheduled_day] = by_day.get(p.scheduled_day, 0) + 1
+    warnings = []
+    total = len(pieces)
+    if total == 0:
+        warnings.append("Piano vuoto.")
+    for ct in CONTENT_TYPES:
+        if total >= 3 and by_type.get(ct, 0) == 0 and ct in ("video_talking", "carosello"):
+            warnings.append(f"Nessun {ct}: valuta se il mix e' troppo sbilanciato.")
+    for day, count in by_day.items():
+        if count >= 4:
+            warnings.append(f"{day}: {count} contenuti nello stesso giorno.")
+    for ct, count in by_type.items():
+        if total and count / total >= 0.75 and total >= 4:
+            warnings.append(f"{ct}: rappresenta {count}/{total} contenuti del piano.")
+    return warnings
+
+
+def _sync_suggestion(session, plan_id: int | None = None) -> dict:
+    if plan_id is None:
+        plan = session.query(PlanWeek).order_by(PlanWeek.week_start.desc()).first()
+    else:
+        plan = session.get(PlanWeek, int(plan_id))
+    if plan is None:
+        return {"needs": {}, "suggested_policy": ""}
+    allocation = _plan_allocation_preview(session, plan.id)
+    needs: dict = {}
+    for row in allocation["pieces"]:
+        if row["would_assign"]:
+            continue
+        categories = allocator.categories_for(row["content_type"])
+        category = categories[0]
+        needs[category] = needs.get(category, 0) + 1
+    policy = ",".join(_policy_chunk_for_category(cat, n) for cat, n in needs.items())
+    return {"plan_id": plan.id, "needs": needs, "suggested_policy": policy}
+
+
+def _policy_chunk_for_category(category: str, count: int) -> str:
+    tab = "CAROSELLI" if category in {"BOOBS", "BOOTY", "GENERAL"} else "VIRAL GENERAL"
+    return f"{tab}:{category}={max(3, count)}"
+
+
+def _piece_lineage(session, piece_id: int) -> dict:
+    piece = session.get(ContentPiece, piece_id)
+    if piece is None:
+        raise ValueError(f"ContentPiece {piece_id} inesistente")
+    prompts = (
+        session.query(GenerationPrompt)
+        .filter(GenerationPrompt.content_piece_id == piece.id)
+        .order_by(GenerationPrompt.id)
+        .all()
+    )
+    ledger_rows = session.query(CreditLedger).filter(CreditLedger.content_piece_id == piece.id).order_by(CreditLedger.id).all()
+    ref = piece.reference
+    return {
+        "piece": {
+            "id": piece.id,
+            "content_type": piece.content_type,
+            "status": piece.status,
+            "caption": piece.caption,
+            "hashtags": piece.hashtags or [],
+            "assets": piece.generated_assets or [],
+            "quality_rating": piece.quality_rating,
+            "priority": piece.priority,
+        },
+        "profile": {"id": piece.profile.id, "nome": piece.profile.nome} if piece.profile else None,
+        "plan": {"id": piece.plan_week.id, "week_start": piece.plan_week.week_start.isoformat()} if piece.plan_week else None,
+        "reference": {
+            "id": ref.id,
+            "url": ref.source_url,
+            "category": ref.source_category,
+            "week_start": ref.week_start.isoformat() if ref.week_start else None,
+            "caption": ref.original_caption,
+            "transcript": ref.transcript,
+        } if ref else None,
+        "prompts": [
+            {
+                "id": p.id,
+                "stage": p.stage,
+                "provider": p.provider,
+                "attempt": p.attempt,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "prompt_text": p.prompt_text,
+            }
+            for p in prompts
+        ],
+        "ledger": [
+            {"timestamp": r.timestamp.isoformat() if r.timestamp else None, "delta_credits": r.delta_credits, "motivo": r.motivo}
+            for r in ledger_rows
+        ],
+    }
+
+
+def _prompt_diff(session, piece_id: int, stage: str | None = None) -> dict:
+    q = session.query(GenerationPrompt).filter(GenerationPrompt.content_piece_id == piece_id)
+    if stage:
+        q = q.filter(GenerationPrompt.stage == stage)
+    prompts = q.order_by(GenerationPrompt.id.desc()).limit(2).all()
+    if len(prompts) < 2:
+        return {"available": False, "diff": "", "prompts": []}
+    newer, older = prompts[0], prompts[1]
+    diff = "\n".join(difflib.unified_diff(
+        older.prompt_text.splitlines(),
+        newer.prompt_text.splitlines(),
+        fromfile=f"{older.stage} attempt {older.attempt}",
+        tofile=f"{newer.stage} attempt {newer.attempt}",
+        lineterm="",
+    ))
+    return {"available": True, "diff": diff, "prompts": [{"id": older.id}, {"id": newer.id}]}
+
+
+def _copy_pack(session, piece_id: int) -> dict:
+    piece = session.get(ContentPiece, piece_id)
+    if piece is None:
+        raise ValueError(f"ContentPiece {piece_id} inesistente")
+    folder = None
+    asset = next((a for a in (piece.generated_assets or []) if Path(a).exists()), None)
+    if asset:
+        folder = str(Path(asset).resolve().parent)
+    hashtags = " ".join(piece.hashtags or [])
+    text = "\n".join(part for part in [
+        piece.caption or "",
+        hashtags,
+        f"Content: {piece.content_type} #{piece.id}",
+        f"Profile: {piece.profile.nome if piece.profile else '—'}",
+        f"Scheduled: {piece.scheduled_day or '—'}",
+        f"Folder: {folder or '—'}",
+    ] if part)
+    return {"text": text, "folder": folder}
+
+
+def _quality_by_category(session) -> dict:
+    rows = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.quality_rating.is_not(None), ContentPiece.reference_id.is_not(None))
+        .all()
+    )
+    buckets: dict = {}
+    for p in rows:
+        category = p.reference.source_category if p.reference else "—"
+        b = buckets.setdefault(category, {"count": 0, "total": 0})
+        b["count"] += 1
+        b["total"] += p.quality_rating or 0
+    return {
+        cat: {"count": b["count"], "avg_rating": b["total"] / b["count"]}
+        for cat, b in sorted(buckets.items())
+    }
+
+
+def _morning_brief(session) -> dict:
+    active = profiles.get_active_profile(session)
+    plan = None
+    if active:
+        today = dt.date.today()
+        plan = (
+            session.query(PlanWeek)
+            .filter(PlanWeek.profile_id == active.id, PlanWeek.week_start <= today, PlanWeek.week_end >= today)
+            .one_or_none()
+        )
+    sync = _sync_suggestion(session, plan.id if plan else None)
+    retryable = _reference_stats(session)["error_retryable"]
+    balance = budget_ledger.current_balance(session)
+    items = []
+    if balance < config.BUDGET_ALERT_THRESHOLD:
+        items.append(f"Saldo basso: {balance:.2f} CR.")
+    if plan is None:
+        items.append("Nessun piano copre oggi per il profilo attivo.")
+    elif plan.status != "approvato":
+        items.append("Il piano corrente e' ancora in bozza.")
+    if sync["needs"]:
+        items.append("Reference mancanti: " + ", ".join(f"{k} x{v}" for k, v in sync["needs"].items()))
+    if retryable:
+        items.append(f"{retryable} reference fallite ritentabili.")
+    if not items:
+        items.append("Tutto pronto per lavorare.")
+    return {"items": items, "sync_suggestion": sync}
+
+
 class Api:
     # --- dashboard / sistema ---
 
@@ -686,6 +952,10 @@ class Api:
     @_endpoint
     def health_check(self, session):
         return _health_check()
+
+    @_endpoint
+    def morning_brief(self, session):
+        return _morning_brief(session)
 
     # --- profili (Creator) ---
 
@@ -809,9 +1079,41 @@ class Api:
         return {"weeks": _reference_weekly_trend(session, weeks=int(weeks))}
 
     @_endpoint
+    def reference_stock(self, session):
+        return _reference_stock(session)
+
+    @_endpoint
+    def reference_expiring(self, session, days=10):
+        return {"references": _reference_expiring(session, days=int(days))}
+
+    @_endpoint
+    def sync_suggestion(self, session, plan_id=None):
+        return _sync_suggestion(session, int(plan_id) if plan_id is not None else None)
+
+    @_endpoint
     def retry_reference(self, session, reference_id):
         result = reference_sync.retry_reference(int(reference_id))
         return {"retry": result}
+
+    @_endpoint
+    def quarantine_reference(self, session, reference_id, reason=""):
+        item = session.get(ReferenceItem, int(reference_id))
+        if item is None:
+            return {"ok": False, "error": f"Reference {reference_id} inesistente"}
+        item.quarantined = True
+        item.quarantine_reason = reason or None
+        item.quarantined_at = dt.datetime.utcnow()
+        return {"id": item.id, "quarantined": True}
+
+    @_endpoint
+    def unquarantine_reference(self, session, reference_id):
+        item = session.get(ReferenceItem, int(reference_id))
+        if item is None:
+            return {"ok": False, "error": f"Reference {reference_id} inesistente"}
+        item.quarantined = False
+        item.quarantine_reason = None
+        item.quarantined_at = None
+        return {"id": item.id, "quarantined": False}
 
     @_endpoint
     def retry_all_references(self, session, category=None):
@@ -930,6 +1232,67 @@ class Api:
         return _plan_allocation_preview(session, plan.id)
 
     @_endpoint
+    def plan_mix_warnings(self, session, plan_id):
+        return {"warnings": _plan_mix_warnings(session, int(plan_id))}
+
+    @_endpoint
+    def save_plan_template(self, session, plan_id, name):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        template = PlanTemplate(name=name or f"Template piano {plan.id}", profile_id=plan.profile_id)
+        session.add(template)
+        session.flush()
+        pieces = session.query(ContentPiece).filter(ContentPiece.plan_week_id == plan.id).all()
+        counts: dict = {}
+        for p in pieces:
+            key = (p.content_type, p.scheduled_day, p.requested_source_category)
+            counts[key] = counts.get(key, 0) + 1
+        for (content_type, day, category), count in counts.items():
+            if day is None:
+                continue
+            session.add(PlanTemplateItem(
+                template_id=template.id,
+                content_type=content_type,
+                scheduled_day=day,
+                count=count,
+                requested_source_category=category,
+            ))
+        return {"template": {"id": template.id, "name": template.name}}
+
+    @_endpoint
+    def list_plan_templates(self, session, profile_id=None):
+        q = session.query(PlanTemplate)
+        if profile_id is not None:
+            q = q.filter((PlanTemplate.profile_id == int(profile_id)) | (PlanTemplate.profile_id.is_(None)))
+        rows = q.order_by(PlanTemplate.id.desc()).all()
+        return {"templates": [
+            {"id": t.id, "name": t.name, "profile_id": t.profile_id, "items": len(t.items)}
+            for t in rows
+        ]}
+
+    @_endpoint
+    def apply_plan_template(self, session, template_id, profile_id, week_start, week_end):
+        template = session.get(PlanTemplate, int(template_id))
+        if template is None:
+            return {"ok": False, "error": f"Template {template_id} inesistente"}
+        plan = planning.create_plan_week(
+            session,
+            profile_id=int(profile_id),
+            week_start=dt.date.fromisoformat(week_start),
+            week_end=dt.date.fromisoformat(week_end),
+        )
+        for item in template.items:
+            planning.set_cell_count(
+                session,
+                plan,
+                content_type=item.content_type,
+                scheduled_day=item.scheduled_day,
+                target=item.count,
+            )
+        return {"plan": _plan_grid(session, plan)}
+
+    @_endpoint
     def duplicate_plan(self, session, plan_id, week_start, week_end):
         source = session.get(PlanWeek, int(plan_id))
         if source is None:
@@ -989,7 +1352,7 @@ class Api:
         return _production_preview(session, plan_id=plan_id)
 
     @_endpoint
-    def production_run(self, session, plan_id=None, confirmation=None):
+    def production_run(self, session, plan_id=None, confirmation=None, max_pieces=None, max_credits=None):
         if confirmation != "PRODUCI":
             return {"ok": False, "error": "Conferma richiesta: scrivi/manda PRODUCI per avviare la produzione reale."}
         q = session.query(PlanWeek).filter(PlanWeek.status == "approvato")
@@ -999,16 +1362,27 @@ class Api:
             allocator.assign_references_to_plan(session, plan.id)
         session.flush()
         preview = _production_preview(session, plan_id=plan_id)
-        if preview["ready_count"] <= 0:
+        limited_preview = _apply_production_limits(preview, max_pieces=max_pieces, max_credits=max_credits)
+        if limited_preview["ready_count"] <= 0:
             return {"ok": False, "error": "Nessun contenuto pronto da produrre."}
-        if not preview["covers"]:
-            return {"ok": False, "error": "Budget insufficiente per avviare la produzione reale.", **preview}
+        if not limited_preview["covers"]:
+            return {
+                "ok": False,
+                "error": "Budget insufficiente per avviare la produzione reale.",
+                **preview,
+                "preview_limited": limited_preview,
+            }
         # Backup DB prima di una produzione reale (spende crediti, tocca
         # molte righe): richiesto dall'utente (15/07/2026), non blocca la
         # produzione se il backup stesso fallisce.
         backup.run_backup_safe()
-        result = production_engine.run_once(session, plan_id=(int(plan_id) if plan_id is not None else None))
-        return {"preview_before": preview, "production": result}
+        run_kwargs = {"plan_id": (int(plan_id) if plan_id is not None else None)}
+        if max_pieces is not None:
+            run_kwargs["max_pieces"] = int(max_pieces)
+        if max_credits is not None:
+            run_kwargs["max_credits"] = float(max_credits)
+        result = production_engine.run_once(session, **run_kwargs)
+        return {"preview_before": preview, "preview_limited": limited_preview, "production": result}
 
     @_endpoint
     def list_content_pieces(self, session, status=None, plan_id=None, limit=30):
@@ -1039,6 +1413,7 @@ class Api:
                 "was_refused": p.was_refused,
                 "quality_rating": p.quality_rating,
                 "priority": p.priority,
+                "skip_reason": p.skip_reason,
             })
         return {"pieces": result}
 
@@ -1046,6 +1421,39 @@ class Api:
     def retry_content_piece(self, session, piece_id):
         result = production_engine.retry_content_piece(session, int(piece_id))
         return {"retry": result}
+
+    @_endpoint
+    def skip_content_piece(self, session, piece_id, reason=""):
+        return {"skip": production_engine.skip_content_piece(session, int(piece_id), reason=reason or "")}
+
+    @_endpoint
+    def restore_content_piece(self, session, piece_id):
+        return {"restore": production_engine.restore_content_piece(session, int(piece_id))}
+
+    @_endpoint
+    def update_piece_caption(self, session, piece_id, caption, hashtags=None):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        piece.caption = caption or ""
+        if hashtags is not None:
+            if isinstance(hashtags, str):
+                piece.hashtags = [h.strip() for h in hashtags.split() if h.strip()]
+            else:
+                piece.hashtags = list(hashtags)
+        return {"piece_id": piece.id, "caption": piece.caption, "hashtags": piece.hashtags or []}
+
+    @_endpoint
+    def piece_lineage(self, session, piece_id):
+        return _piece_lineage(session, int(piece_id))
+
+    @_endpoint
+    def piece_prompt_diff(self, session, piece_id, stage=None):
+        return _prompt_diff(session, int(piece_id), stage=stage)
+
+    @_endpoint
+    def copy_pack(self, session, piece_id):
+        return _copy_pack(session, int(piece_id))
 
     @_endpoint
     def set_piece_quality(self, session, piece_id, rating):
@@ -1159,6 +1567,72 @@ class Api:
     @_endpoint
     def stage_duration_stats(self, session):
         return {"stages": _stage_duration_stats(session)}
+
+    @_endpoint
+    def quality_by_category(self, session):
+        return {"categories": _quality_by_category(session)}
+
+    @_endpoint
+    def list_creative_rules(self, session, status="active"):
+        q = session.query(CreativeRule)
+        if status != "all":
+            q = q.filter(CreativeRule.status == status)
+        rows = q.order_by(CreativeRule.id.desc()).all()
+        return {"rules": [
+            {"id": r.id, "rule_text": r.rule_text, "scope": r.scope, "status": r.status, "source_content_piece_id": r.source_content_piece_id}
+            for r in rows
+        ]}
+
+    @_endpoint
+    def add_creative_rule(self, session, rule_text, scope="general", source_content_piece_id=None):
+        rule = CreativeRule(rule_text=rule_text, scope=scope or "general", source_content_piece_id=(int(source_content_piece_id) if source_content_piece_id else None))
+        session.add(rule)
+        session.flush()
+        return {"rule": {"id": rule.id}}
+
+    @_endpoint
+    def archive_creative_rule(self, session, rule_id):
+        rule = session.get(CreativeRule, int(rule_id))
+        if rule is None:
+            return {"ok": False, "error": f"Regola {rule_id} inesistente"}
+        rule.status = "archived"
+        return {"id": rule.id, "status": rule.status}
+
+    @_endpoint
+    def suggest_rule_from_piece(self, session, piece_id, note):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        text = note or f"Migliorare contenuti simili a {piece.content_type} con rating {piece.quality_rating or 'basso'}"
+        rule = CreativeRule(rule_text=text, scope=piece.content_type, source_content_piece_id=piece.id)
+        session.add(rule)
+        session.flush()
+        return {"rule": {"id": rule.id, "rule_text": rule.rule_text}}
+
+    # --- tracking Instagram pubblico ---
+
+    @_endpoint
+    def tracking_report(self, session):
+        return profile_tracking.report(session)
+
+    @_endpoint
+    def add_tracked_profile(self, session, url_or_username, label=None, profile_id=None):
+        tracked = profile_tracking.add_tracked_profile(
+            session,
+            url_or_username=url_or_username,
+            label=label,
+            profile_id=(int(profile_id) if profile_id else None),
+        )
+        return {"tracked": {"id": tracked.id, "username": tracked.username, "label": tracked.label}}
+
+    @_endpoint
+    def deactivate_tracked_profile(self, session, tracked_id):
+        profile_tracking.deactivate_tracked_profile(session, int(tracked_id))
+        return {}
+
+    @_endpoint
+    def sync_tracked_profiles(self, session):
+        return profile_tracking.sync_all(session)
 
     # --- costanti utili al frontend ---
 

@@ -1022,3 +1022,100 @@ cartella esiste davvero e non e' gia' presente — nessuna modifica richiesta a 
 duplica una cartella gia' presente, non aggiunge cartelle home-relative inesistenti. 239 test
 verdi in tutto il progetto. Verificato anche a mano che `health_check()` ora ritorna
 `all_ok: True` con lo stesso ambiente che prima falliva.
+
+## 28. Secondo pacchetto feature operative + tracking IG pubblico — FATTO (16/07/2026, sessione Codex)
+
+L'utente ha chiesto di implementare tutte le 20 micro-feature operative proposte dopo l'analisi
+del progetto, piu' una nuova sezione di tracking profili Instagram. L'obiettivo non era cambiare
+lo scheletro del prodotto (gia' completo), ma aggiungere strumenti piccoli e utili per usarlo
+davvero per una settimana senza dover aprire DB/terminali ogni volta.
+
+### 28.1 Oggi/Piano/Libreria
+
+- **Morning brief** (`Api.morning_brief`): checklist sintetica su saldo basso, piano corrente,
+  bozza/approvato, reference mancanti e reference fallite ritentabili. UI: sezione "Checklist
+  mattutina" in Oggi.
+- **Controllo mix piano** (`plan_mix_warnings`): segnala piano vuoto, concentrazione eccessiva
+  su un tipo contenuto, troppi contenuti nello stesso giorno, assenza di talking/caroselli quando
+  il piano e' abbastanza grande.
+- **Preset piano** (`PlanTemplate`, `PlanTemplateItem`): salva una griglia esistente e la riapplica
+  su una nuova settimana/profilo. Copia conteggi e giorni, non reference ne' output.
+- **Suggerimento sync** (`sync_suggestion`): se un piano non ha abbastanza reference, propone una
+  policy tipo `VIRAL GENERAL:TALKING=3` da usare per il prossimo sync bilanciato.
+- **Stock/scadenze Libreria** (`reference_stock`, `reference_expiring`): conteggi per categoria e
+  lista dei reference pronti che stanno per uscire dalla finestra utile.
+- **Quarantena reference**: nuove colonne su `ReferenceItem` (`quarantined`, `quarantine_reason`,
+  `quarantined_at`). L'allocator esclude le reference quarantinate senza cancellarle dal DB e senza
+  toccare lo Sheet; UI: bottone Quarantena/Riabilita.
+
+### 28.2 Produzione e audit
+
+- **Limiti operativi produzione**: `production_run`/`production_engine.run_once` accettano
+  `max_pieces` e `max_credits`; UI: campi "Max pezzi"/"Max CR" e bottone "Prossimo 1". Serve a
+  produrre piccoli batch controllati senza cambiare piano.
+- **Skip/restore pezzo**: nuove colonne `ContentPiece.skip_reason`/`skipped_at`; `skip_content_piece`
+  porta il pezzo a `status="skipped"`, `restore_content_piece` lo rimette in `reference_ready`.
+- **Prompt lineage**: nuova tabella `GenerationPrompt` e registrazione dei prompt reali usati negli
+  stadi creativi (`image_regen`, `video_regen`; per motion control si registra una traccia tecnica
+  con image/video reference). Endpoint `piece_lineage`, `piece_prompt_diff`.
+- **Copy pack e caption edit**: endpoint `copy_pack` genera un blocco pronto da copiare con caption,
+  hashtag, tipo contenuto, profilo, giorno e cartella output; `update_piece_caption` modifica caption
+  e hashtag post-produzione.
+- **Riconciliazione Higgsfield dopo errore `--wait`**: `higgsfield_client._run_create_json_with_reconcile`
+  intercetta un `HiggsfieldError` durante `generate create --wait`, chiama `reconcile_recent_job()`
+  su `higgsfield generate list`, e recupera un job recente completato dello stesso modello se ha
+  `result_url`. Questo riduce il rischio di segnare fallito un job in realta' riuscito e addebitato.
+
+### 28.3 Qualita' e memoria creativa
+
+- **Qualita' per categoria** (`quality_by_category`): aggrega i `quality_rating` manuali dei pezzi
+  consegnati per `ReferenceItem.source_category`, cosi' si vede quali categorie stanno rendendo
+  meglio/peggio.
+- **Regole creative** (`CreativeRule`): memoria leggera di indicazioni operative future, attive o
+  archiviate. Si possono aggiungere manualmente o generare da un pezzo con rating basso
+  (`suggest_rule_from_piece`). UI in Sistema.
+
+### 28.4 Tracking profili Instagram pubblici
+
+Nuove tabelle:
+- `TrackedInstagramProfile`: profilo IG da monitorare (`username`, `url`, label, opzionale link al
+  `Profile` interno, active).
+- `InstagramProfileSnapshot`: snapshot giornaliero di metriche pubbliche (followers/following/media
+  count, miglior video recente per views/plays, like/commenti/caption del video migliore, raw minimo).
+
+Modulo `aicraft/profile_tracking.py`:
+- `username_from_url()` normalizza URL o `@username` e rifiuta URL di post/reel/stories.
+- `add_tracked_profile()` crea/riattiva un profilo.
+- `sync_all()` usa la sessione instagrapi locale gia' usata da `reference_sync.downloader` per leggere
+  metriche pubbliche. Un profilo in errore non blocca gli altri.
+- `report()` ritorna ultimo snapshot e delta follower rispetto allo snapshot precedente.
+
+Superficie operativa:
+- API desktop: `tracking_report`, `add_tracked_profile`, `deactivate_tracked_profile`,
+  `sync_tracked_profiles`.
+- UI: nuova tab "Tracking" con form URL/label, report per profilo, delta follower, miglior video e
+  pulsante Sync ora.
+- CLI: `aicraft tracking add`, `aicraft tracking sync`, `aicraft tracking report`.
+- Scheduler: `scheduler.install_daily_tracking()` scrive il LaunchAgent
+  `com.aicraft.daily-profile-tracking`, default 08:30, che esegue `aicraft tracking sync`.
+
+Limiti intenzionali:
+- Non usa API business/private e non prova a leggere metriche non pubbliche.
+- I test usano un client finto: resta da fare un primo sync reale controllato per validare login
+  instagrapi, rate-limit e comportamento su profili privati/non disponibili.
+
+### 28.5 Test
+
+Test aggiunti su:
+- allocator che esclude reference in quarantena;
+- limiti produzione per pezzi/crediti, skip/restore, prompt attempt;
+- tracking username/sync/report con client finto;
+- riconciliazione/lista job Higgsfield;
+- scheduler giornaliero tracking;
+- CLI tracking;
+- API desktop per quarantena, preset piano, sync suggestion, lineage/diff/copy pack, regole creative,
+  quality by category, tracking e morning brief.
+
+Stato a fine sessione: **264 test verdi** (`.venv/bin/python -m pytest -q`) e
+`node --check aicraft/desktop/web/app.js` verde. Nessuna chiamata reale a Instagram/Google
+Sheet/Higgsfield durante la suite.

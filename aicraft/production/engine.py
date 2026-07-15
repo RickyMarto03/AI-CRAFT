@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import logging
 import time
+import datetime as dt
 from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import config
+from ..budget import estimate as budget_estimate
 from ..budget import ledger
-from ..db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
+from ..db.models import ContentPiece, ContentPieceEvent, GenerationPrompt, PlanWeek, Profile, ReferenceItem
 from ..reference_sync import allocator
 from . import carousel_selection, character, claude_creative, delivery, frame_picker, higgsfield_client, pipeline_spec, qa, settings
 
@@ -96,6 +99,23 @@ def _record_event(
     session.commit()
 
 
+def _record_prompt(session: Session, piece: ContentPiece, *, stage: str, provider: str, prompt_text: str) -> None:
+    last_attempt = (
+        session.query(func.max(GenerationPrompt.attempt))
+        .filter(GenerationPrompt.content_piece_id == piece.id, GenerationPrompt.stage == stage)
+        .scalar()
+        or 0
+    )
+    session.add(GenerationPrompt(
+        content_piece_id=piece.id,
+        stage=stage,
+        provider=provider,
+        attempt=last_attempt + 1,
+        prompt_text=prompt_text,
+    ))
+    session.commit()
+
+
 def _localize_asset(piece: ContentPiece, url: str, *, kind: str, index: int = 1) -> str:
     """Scarica in locale un result_url remoto (GAP reale trovato in review,
     15/07/2026: senza questo, generated_assets teneva solo URL Higgsfield e
@@ -160,6 +180,7 @@ def _stage_image_regen(session: Session, piece: ContentPiece, reference: Optiona
         # generate create/get non riportano il costo del job: va richiesto a
         # parte con generate cost, PRIMA di lanciare (verificato 14/07/2026).
         cost = higgsfield_client.estimate_cost(op.job_type, prompt=prompt, **op.params)
+        _record_prompt(session, piece, stage="image_regen", provider=op.job_type, prompt_text=prompt)
         result = higgsfield_client.generate_image(prompt, model=op.job_type, custom_reference_id=char.soul_id, **op.params)
         assets.append(_localize_asset(piece, result.result_url, kind="image", index=index))
         piece.generated_assets = assets
@@ -185,6 +206,13 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
         if reference is None or not reference.local_video_path:
             raise RuntimeError("video_balletti richiede il video originale scaricato (reference.local_video_path)")
         try:
+            _record_prompt(
+                session,
+                piece,
+                stage="video_regen",
+                provider=op.job_type,
+                prompt_text=f"motion_control image_reference={source_image} video_reference={reference.local_video_path}",
+            )
             result = higgsfield_client.generate_motion_control(
                 image_reference=source_image, video_reference=reference.local_video_path,
             )
@@ -240,6 +268,7 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
     video_references = [str(video_path)] if use_video_reference else None
 
     cost = higgsfield_client.estimate_cost(op.job_type, prompt=prompt, **call_params)
+    _record_prompt(session, piece, stage="video_regen", provider=op.job_type, prompt_text=prompt)
     result = higgsfield_client.generate_video(
         prompt, model=op.job_type, start_image=source_image,
         video_references=video_references, **call_params,
@@ -385,7 +414,39 @@ def retry_content_piece(session: Session, piece_id: int) -> dict:
     return {"id": piece.id, "status": piece.status}
 
 
-def run_once(session: Session, *, plan_id: int | None = None) -> dict:
+def skip_content_piece(session: Session, piece_id: int, *, reason: str = "") -> dict:
+    piece = session.get(ContentPiece, piece_id)
+    if piece is None:
+        raise ValueError(f"ContentPiece {piece_id} inesistente")
+    if piece.status == "delivered":
+        raise ValueError(f"ContentPiece {piece_id} gia' consegnato, non puo' essere saltato")
+    piece.status = "skipped"
+    piece.skip_reason = reason or None
+    piece.skipped_at = dt.datetime.utcnow()
+    session.flush()
+    return {"id": piece.id, "status": piece.status}
+
+
+def restore_content_piece(session: Session, piece_id: int) -> dict:
+    piece = session.get(ContentPiece, piece_id)
+    if piece is None:
+        raise ValueError(f"ContentPiece {piece_id} inesistente")
+    if piece.status != "skipped":
+        raise ValueError(f"ContentPiece {piece_id} non e' in skipped")
+    piece.status = "reference_ready"
+    piece.skip_reason = None
+    piece.skipped_at = None
+    session.flush()
+    return {"id": piece.id, "status": piece.status}
+
+
+def run_once(
+    session: Session,
+    *,
+    plan_id: int | None = None,
+    max_pieces: int | None = None,
+    max_credits: float | None = None,
+) -> dict:
     from sqlalchemy import select
 
     plan_stmt = select(PlanWeek).where(PlanWeek.status == "approvato")
@@ -427,6 +488,26 @@ def run_once(session: Session, *, plan_id: int | None = None) -> dict:
     if plan_id is not None:
         pending_stmt = pending_stmt.where(ContentPiece.plan_week_id == plan_id)
     pending = session.scalars(pending_stmt).all()
+    original_pending_count = len(pending)
+    skipped_by_limit = 0
+    estimated_selected_cost = 0.0
+    if max_pieces is not None and max_pieces > 0:
+        skipped_by_limit += max(0, len(pending) - max_pieces)
+        pending = pending[:max_pieces]
+    if max_credits is not None and max_credits > 0:
+        selected = []
+        cache: dict = {}
+        for piece in pending:
+            estimate = budget_estimate.estimate_content_type(piece.content_type, cache=cache)
+            if selected and estimated_selected_cost + estimate > max_credits:
+                skipped_by_limit += 1
+                continue
+            if not selected and estimate > max_credits:
+                skipped_by_limit += 1
+                continue
+            selected.append(piece)
+            estimated_selected_cost += estimate
+        pending = selected
     logger.info("%d ContentPiece pronti per la produzione (piani approvati)", len(pending))
     before = {piece.id: piece.status for piece in pending}
     for piece in pending:
@@ -436,6 +517,9 @@ def run_once(session: Session, *, plan_id: int | None = None) -> dict:
         "approved_plans": len(approved_plans),
         "assigned_references": assigned_total,
         "missing_references": missing_total,
+        "ready_before_limits": original_pending_count,
+        "skipped_by_limit": skipped_by_limit,
+        "estimated_selected_cost": estimated_selected_cost if max_credits is not None else None,
         "processed": len(pending),
         "delivered": sum(1 for piece in pending if piece.status == "delivered"),
         "failed": sum(1 for piece in pending if piece.status not in ("delivered", before.get(piece.id))),

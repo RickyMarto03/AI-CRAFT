@@ -72,3 +72,15 @@ def test_video_talking_prende_solo_categoria_talking_con_video_locale(db_session
     rows = allocator.select_candidates(db_session, content_type="video_talking", selection_weeks=2)
 
     assert [r.source_url for r in rows] == ["talk"]
+
+
+def test_select_candidates_esclude_reference_in_quarantena(db_session):
+    _ref(db_session, url="ok", week_start=dt.date(2026, 7, 13), category="BOOBS")
+    bad = _ref(db_session, url="bad", week_start=dt.date(2026, 7, 13), category="BOOBS", order=0)
+    bad.quarantined = True
+    bad.quarantine_reason = "persona sbagliata"
+    db_session.commit()
+
+    rows = allocator.select_candidates(db_session, content_type="carosello", selection_weeks=2)
+
+    assert [r.source_url for r in rows] == ["ok"]

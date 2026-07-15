@@ -55,13 +55,8 @@ class GenerationResult:
     raw: dict
 
 
-def _run_json(args: list) -> dict:
-    """Esegue un comando `higgsfield ... --json` e ne parsa lo stdout.
-
-    `generate create --wait --json` risponde con una LISTA di job (anche per
-    una singola generazione); `generate cost --json` risponde con un dict
-    singolo (`{"credits": N}`). Normalizza entrambi i casi a un dict.
-    """
+def _run_json_raw(args: list):
+    """Esegue un comando `higgsfield ... --json` e ritorna il JSON grezzo."""
     cmd = [config.HIGGSFIELD_CLI_BIN, *args, "--json"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -74,17 +69,29 @@ def _run_json(args: list) -> dict:
         raise HiggsfieldError(f"Comando fallito ({' '.join(cmd)}): {exc.stderr.strip()}") from exc
 
     try:
-        data = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise HiggsfieldError(
-            f"Output non JSON da `{' '.join(cmd)}`: {proc.stdout[:300]!r}"
-        ) from exc
+        raise HiggsfieldError(f"Output non JSON da `{' '.join(cmd)}`: {proc.stdout[:300]!r}") from exc
+
+
+def _run_json(args: list) -> dict:
+    data = _run_json_raw(args)
 
     if isinstance(data, list):
         if not data:
-            raise HiggsfieldError(f"Lista di job vuota da `{' '.join(cmd)}`")
+            raise HiggsfieldError(f"Lista di job vuota da `{' '.join([config.HIGGSFIELD_CLI_BIN, *args, '--json'])}`")
         return data[0]
     return data
+
+
+def _run_create_json_with_reconcile(args: list, model: str) -> dict:
+    try:
+        return _run_json(args)
+    except HiggsfieldError as exc:
+        recovered = reconcile_recent_job(model)
+        if recovered is not None and recovered.result_url:
+            return recovered.raw
+        raise exc
 
 
 def _parse_generation_result(data: dict) -> GenerationResult:
@@ -149,7 +156,7 @@ def generate_image(
         args += ["--custom_reference_id", custom_reference_id]
     if extra_args:
         args += extra_args
-    return _parse_generation_result(_run_json(args))
+    return _parse_generation_result(_run_create_json_with_reconcile(args, model))
 
 
 def generate_video(
@@ -186,7 +193,7 @@ def generate_video(
         args += ["--video-references", ref]
     if extra_args:
         args += extra_args
-    return _parse_generation_result(_run_json(args))
+    return _parse_generation_result(_run_create_json_with_reconcile(args, model))
 
 
 def generate_motion_control(
@@ -213,7 +220,7 @@ def generate_motion_control(
         "--wait",
     ]
     try:
-        return _parse_generation_result(_run_json(args))
+        return _parse_generation_result(_run_create_json_with_reconcile(args, model))
     except HiggsfieldError as exc:
         if "nsfw" in str(exc).lower():
             raise HiggsfieldNSFWBlockedError(str(exc)) from exc
@@ -247,6 +254,36 @@ def download_result(url: str, dest_path: Path) -> Path:
 
 def get_job(job_id: str) -> GenerationResult:
     return _parse_generation_result(_run_json(["generate", "get", job_id]))
+
+
+def list_recent_jobs(limit: int = 20) -> list[GenerationResult]:
+    data = _run_json_raw(["generate", "list"])
+    rows = data if isinstance(data, list) else data.get("jobs", [])
+    results = []
+    for row in rows[:limit]:
+        try:
+            results.append(_parse_generation_result(row))
+        except HiggsfieldError:
+            continue
+    return results
+
+
+def reconcile_recent_job(model: str, *, limit: int = 20) -> GenerationResult | None:
+    """Recupera un job recente completato dopo un errore di `--wait`.
+
+    In alcuni casi il provider puo' aver creato/completato il job e il CLI
+    fallire solo durante l'attesa. Prima di arrenderci guardiamo la lista
+    recente e cerchiamo un job dello stesso modello con risultato.
+    """
+    try:
+        jobs = list_recent_jobs(limit=limit)
+    except HiggsfieldError:
+        return None
+    for job in jobs:
+        raw_model = job.raw.get("model") or job.raw.get("job_type") or job.raw.get("type")
+        if raw_model == model and job.status in {"completed", "succeeded", "success"} and job.result_url:
+            return job
+    return None
 
 
 def account_status() -> dict:

@@ -56,3 +56,39 @@ def test_download_result_propaga_errore_http(tmp_path, monkeypatch):
 
     with pytest.raises(higgsfield_client.requests.HTTPError):
         higgsfield_client.download_result("https://cdn.example/mancante.mp4", tmp_path / "dest.mp4")
+
+
+def test_list_recent_jobs_accetta_lista_o_payload_con_jobs(monkeypatch):
+    monkeypatch.setattr(
+        higgsfield_client,
+        "_run_json_raw",
+        lambda args: {"jobs": [{"id": "j1", "status": "completed", "result_url": "https://cdn.example/a.mp4", "model": "seedance_2_0"}]},
+    )
+
+    jobs = higgsfield_client.list_recent_jobs()
+
+    assert len(jobs) == 1
+    assert jobs[0].job_id == "j1"
+    assert jobs[0].result_url == "https://cdn.example/a.mp4"
+
+
+def test_create_json_recupera_job_recente_se_wait_fallisce(monkeypatch):
+    def fail(args):
+        raise higgsfield_client.HiggsfieldError("wait timeout")
+
+    monkeypatch.setattr(higgsfield_client, "_run_json", fail)
+    monkeypatch.setattr(
+        higgsfield_client,
+        "reconcile_recent_job",
+        lambda model: higgsfield_client.GenerationResult(
+            job_id="recovered",
+            status="completed",
+            result_url="https://cdn.example/recovered.mp4",
+            cost_credits=None,
+            raw={"id": "recovered", "status": "completed", "result_url": "https://cdn.example/recovered.mp4"},
+        ),
+    )
+
+    data = higgsfield_client._run_create_json_with_reconcile(["generate", "create", "seedance_2_0"], "seedance_2_0")
+
+    assert data["id"] == "recovered"

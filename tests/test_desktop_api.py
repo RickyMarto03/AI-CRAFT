@@ -11,7 +11,10 @@ from sqlalchemy.orm import sessionmaker
 
 from aicraft.budget import ledger
 from aicraft.db.base import Base
-from aicraft.db.models import CharacterVersion, ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
+from aicraft.db.models import (
+    CharacterVersion, ContentPiece, ContentPieceEvent, GenerationPrompt,
+    PlanWeek, Profile, ReferenceItem,
+)
 from aicraft.desktop import api as api_mod
 from aicraft.production import higgsfield_client
 from aicraft.reference_sync import sync as reference_sync
@@ -293,6 +296,51 @@ def test_production_run_chiama_engine_se_pronto(api, monkeypatch):
     assert seen["plan_id"] is None
     assert r["preview_before"]["ready_count"] == 1
     assert r["production"]["delivered"] == 1
+
+
+def test_production_run_con_limite_pezzi_usa_budget_del_batch_limitato(api, monkeypatch):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.budget_topup(15.0)  # copre 1 talking (~10.12), non 2 talking (~20.24)
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+        refs = [
+            ReferenceItem(
+                source_url=f"https://www.instagram.com/reel/RUNLIMIT{i}/",
+                source_tab="VIRAL GENERAL",
+                source_category="TALKING",
+                content_type_hint="video",
+                week_start=dt.date(2026, 7, 13),
+                week_end=dt.date(2026, 7, 19),
+                status="ready",
+                local_video_path="/tmp/video.mp4",
+            )
+            for i in range(2)
+        ]
+        pieces = [
+            ContentPiece(profile=profile, plan_week=plan, reference=refs[i], content_type="video_talking", status="reference_ready")
+            for i in range(2)
+        ]
+        session.add_all([plan, *refs, *pieces])
+        session.commit()
+
+    seen = {}
+
+    def fake_run_once(session, **kwargs):
+        seen.update(kwargs)
+        return {"approved_plans": 1, "assigned_references": 0, "missing_references": 0, "processed": 1, "delivered": 1, "failed": 0}
+
+    monkeypatch.setattr(api_mod.production_engine, "run_once", fake_run_once)
+
+    r = api.production_run(confirmation="PRODUCI", max_pieces=1)
+
+    assert r["ok"]
+    assert r["preview_before"]["covers"] is False
+    assert r["preview_limited"]["covers"] is True
+    assert r["preview_limited"]["ready_count"] == 1
+    assert r["preview_limited"]["estimated_cost"] == pytest.approx(10.12)
+    assert seen["max_pieces"] == 1
 
 
 def test_reference_stats_mostra_settimane_categorie_e_latest(api):
@@ -1250,3 +1298,192 @@ def test_production_preview_espone_dettaglio_pezzi(api):
     assert r["pieces"][0]["content_type"] == "carosello"
     assert r["pieces"][0]["reference_category"] == "BOOBS"
     assert r["pieces"][0]["estimated_cost"] == pytest.approx(r["estimated_cost"])
+
+
+def test_reference_quarantine_aggiorna_stock_e_lista(api):
+    with api_mod.SessionLocal() as session:
+        ok = _seed_reference(status="ready", category="BOOBS", source_url="https://www.instagram.com/p/OK/")
+        bad = _seed_reference(status="ready", category="BOOTY", source_url="https://www.instagram.com/p/BAD/")
+        session.add_all([ok, bad])
+        session.commit()
+        bad_id = bad.id
+
+    q = api.quarantine_reference(bad_id, "qualita bassa")
+    assert q["ok"]
+
+    stock = api.reference_stock()
+    assert stock["total_ready"] == 1
+    assert stock["by_category"] == {"BOOBS": 1}
+
+    listed = api.list_references()
+    by_id = {row["id"]: row for row in listed["references"]}
+    assert by_id[bad_id]["quarantined"] is True
+    assert by_id[bad_id]["quarantine_reason"] == "qualita bassa"
+
+    restored = api.unquarantine_reference(bad_id)
+    assert restored["ok"]
+    assert api.reference_stock()["total_ready"] == 2
+
+
+def test_plan_template_mix_warnings_e_sync_suggestion(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    plan_id = api.create_plan(1, "2026-07-20", "2026-07-26")["plan"]["id"]
+    api.plan_set_cell(plan_id, "video_talking", "lun", 4)
+
+    warnings = api.plan_mix_warnings(plan_id)
+    assert warnings["ok"]
+    assert any("lun" in w for w in warnings["warnings"])
+
+    suggestion = api.sync_suggestion(plan_id)
+    assert suggestion["ok"]
+    assert suggestion["needs"] == {"TALKING": 4}
+    assert "VIRAL GENERAL:TALKING" in suggestion["suggested_policy"]
+
+    saved = api.save_plan_template(plan_id, "Settimana talking")
+    assert saved["ok"]
+    templates = api.list_plan_templates(1)
+    assert templates["templates"][0]["name"] == "Settimana talking"
+
+    applied = api.apply_plan_template(templates["templates"][0]["id"], 1, "2026-07-27", "2026-08-02")
+    assert applied["ok"]
+    assert applied["plan"]["grid"]["video_talking"]["lun"] == 4
+
+
+def test_piece_lineage_prompt_diff_copy_pack_e_caption_edit(api, tmp_path):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    asset = tmp_path / "asset.png"
+    asset.write_bytes(b"finta")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        ref = ReferenceItem(
+            source_url="https://www.instagram.com/p/LINEAGE/",
+            status="ready",
+            source_category="BOOBS",
+            week_start=dt.date(2026, 7, 13),
+            original_caption="caption originale",
+        )
+        piece = ContentPiece(
+            profile=profile,
+            reference=ref,
+            content_type="carosello",
+            status="delivered",
+            caption="caption consegnata",
+            hashtags=["#ruby", "#test"],
+            generated_assets=[str(asset)],
+            scheduled_day="lun",
+        )
+        session.add_all([ref, piece])
+        session.commit()
+        session.add_all([
+            GenerationPrompt(content_piece_id=piece.id, stage="image_regen", provider="soul", attempt=1, prompt_text="prompt vecchio"),
+            GenerationPrompt(content_piece_id=piece.id, stage="image_regen", provider="soul", attempt=2, prompt_text="prompt nuovo"),
+        ])
+        ledger.record_consumption(session, credits=0.36, motivo="image_regen", content_piece_id=piece.id)
+        session.commit()
+        piece_id = piece.id
+
+    lineage = api.piece_lineage(piece_id)
+    assert lineage["ok"]
+    assert lineage["reference"]["url"] == "https://www.instagram.com/p/LINEAGE/"
+    assert len(lineage["prompts"]) == 2
+    assert lineage["ledger"][0]["delta_credits"] == -0.36
+
+    diff = api.piece_prompt_diff(piece_id, "image_regen")
+    assert diff["ok"]
+    assert diff["available"] is True
+    assert "-prompt vecchio" in diff["diff"]
+    assert "+prompt nuovo" in diff["diff"]
+
+    pack = api.copy_pack(piece_id)
+    assert pack["ok"]
+    assert "caption consegnata" in pack["text"]
+    assert pack["folder"] == str(tmp_path)
+
+    edited = api.update_piece_caption(piece_id, "nuova caption", "#uno #due")
+    assert edited["ok"]
+    assert edited["hashtags"] == ["#uno", "#due"]
+
+
+def test_skip_restore_content_piece_endpoint(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="reference_ready")
+        session.add(piece)
+        session.commit()
+        piece_id = piece.id
+
+    skipped = api.skip_content_piece(piece_id, "non serve oggi")
+    assert skipped["ok"]
+    listed = api.list_content_pieces(status="skipped")
+    assert listed["pieces"][0]["skip_reason"] == "non serve oggi"
+
+    restored = api.restore_content_piece(piece_id)
+    assert restored["ok"]
+    assert api.list_content_pieces(status="reference_ready")["pieces"][0]["id"] == piece_id
+
+
+def test_quality_by_category_e_regole_creative(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        ref = ReferenceItem(source_url="https://www.instagram.com/p/QUALITY/", status="ready", source_category="BOOBS")
+        piece = ContentPiece(profile=profile, reference=ref, content_type="carosello", status="delivered", quality_rating=2)
+        session.add_all([ref, piece])
+        session.commit()
+        piece_id = piece.id
+
+    quality = api.quality_by_category()
+    assert quality["ok"]
+    assert quality["categories"]["BOOBS"]["avg_rating"] == 2.0
+
+    suggested = api.suggest_rule_from_piece(piece_id, "Evitare pose troppo simili alla reference")
+    assert suggested["ok"]
+    manual = api.add_creative_rule("Usare luci piu naturali", scope="image")
+    assert manual["ok"]
+
+    rules = api.list_creative_rules()
+    assert len(rules["rules"]) == 2
+    archived = api.archive_creative_rule(manual["rule"]["id"])
+    assert archived["status"] == "archived"
+    assert len(api.list_creative_rules()["rules"]) == 1
+
+
+def test_tracking_api_con_sync_mockato(api, monkeypatch):
+    added = api.add_tracked_profile("https://www.instagram.com/RubyWilde/", label="Ruby Wilde")
+    assert added["ok"]
+
+    def fake_sync_all(session):
+        return {"synced": [{"id": added["tracked"]["id"], "username": "rubywilde", "snapshot_id": 1}], "errors": []}
+
+    monkeypatch.setattr(api_mod.profile_tracking, "sync_all", fake_sync_all)
+
+    synced = api.sync_tracked_profiles()
+    assert synced["ok"]
+    assert synced["errors"] == []
+
+    report = api.tracking_report()
+    assert report["ok"]
+    assert report["profiles"][0]["username"] == "rubywilde"
+
+
+def test_morning_brief_segnala_piano_e_reference_mancanti(api):
+    today = dt.date.today()
+    week_start = today - dt.timedelta(days=today.weekday())
+    week_end = week_start + dt.timedelta(days=6)
+    oggi = api_mod.GIORNI_VALIDI[today.weekday()]
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.set_active_profile(1)
+    plan_id = api.create_plan(1, week_start.isoformat(), week_end.isoformat())["plan"]["id"]
+    api.plan_set_cell(plan_id, "video_talking", oggi, 1)
+
+    brief = api.morning_brief()
+
+    assert brief["ok"]
+    assert any("bozza" in item for item in brief["items"])
+    assert any("Reference mancanti" in item for item in brief["items"])

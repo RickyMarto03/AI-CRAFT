@@ -41,6 +41,9 @@ def _run_additive_migrations() -> None:
                 "downloaded_at": "DATETIME",
                 "transcript_segments": "TEXT",
                 "download_attempts": "INTEGER",
+                "quarantined": "BOOLEAN",
+                "quarantine_reason": "TEXT",
+                "quarantined_at": "DATETIME",
             },
         )
         # Backfill: le righe esistenti prendono NULL da ALTER TABLE ADD
@@ -50,6 +53,7 @@ def _run_additive_migrations() -> None:
         # giro non ci sono piu' righe NULL da aggiornare.
         with engine.begin() as conn:
             conn.execute(text("UPDATE reference_items SET download_attempts = 0 WHERE download_attempts IS NULL"))
+            conn.execute(text("UPDATE reference_items SET quarantined = 0 WHERE quarantined IS NULL"))
     if "content_pieces" in inspector.get_table_names():
         _add_missing_columns(
             "content_pieces",
@@ -58,6 +62,8 @@ def _run_additive_migrations() -> None:
                 "was_refused": "BOOLEAN",
                 "quality_rating": "INTEGER",
                 "priority": "INTEGER",
+                "skip_reason": "TEXT",
+                "skipped_at": "DATETIME",
             },
         )
         with engine.begin() as conn:

@@ -24,3 +24,26 @@ def test_install_weekly_sync_scrive_plist(tmp_path):
     data = plistlib.loads(path.read_bytes())
     assert path == target_dir / f"{scheduler.DEFAULT_LABEL}.plist"
     assert data["ProgramArguments"][-2:] == ["references", "sync-policy"]
+
+
+def test_daily_tracking_plist_contiene_tracking_sync(tmp_path):
+    plist = scheduler.daily_tracking_plist(project_dir=tmp_path, python_bin="/venv/bin/python", hour=8, minute=45)
+
+    assert plist["Label"] == scheduler.TRACKING_LABEL
+    assert plist["ProgramArguments"] == ["/venv/bin/python", "-m", "aicraft.cli", "tracking", "sync"]
+    assert plist["WorkingDirectory"] == str(tmp_path)
+    assert plist["StartCalendarInterval"] == {"Hour": 8, "Minute": 45}
+
+
+def test_install_daily_tracking_scrive_plist(tmp_path):
+    target_dir = tmp_path / "LaunchAgents"
+
+    path = scheduler.install_daily_tracking(
+        launch_agents_dir=target_dir,
+        project_dir=tmp_path,
+        python_bin="/venv/bin/python",
+    )
+
+    data = plistlib.loads(path.read_bytes())
+    assert path == target_dir / f"{scheduler.TRACKING_LABEL}.plist"
+    assert data["ProgramArguments"][-2:] == ["tracking", "sync"]

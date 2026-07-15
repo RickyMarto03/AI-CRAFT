@@ -94,6 +94,14 @@ class ReferenceItem(Base):
     # questa modifica: la migrazione additiva in db/base.py lo backfilla a 0.
     download_attempts: Mapped[Optional[int]] = mapped_column(default=0)
 
+    # Quarantena manuale: reference scaricata ma esclusa dall'allocator
+    # (persona sbagliata, qualita' bassa, troppo esplicita, ecc.). Non la
+    # cancella dal DB e non tocca lo Sheet: resta tracciabile ma non viene
+    # piu' pescata automaticamente finche' l'utente non la riabilita.
+    quarantined: Mapped[bool] = mapped_column(default=False)
+    quarantine_reason: Mapped[Optional[str]]
+    quarantined_at: Mapped[Optional[dt.datetime]]
+
     imported_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(
         default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
@@ -151,6 +159,11 @@ class ContentPiece(Base):
     # dell'utente per poter promuovere un pezzo specifico in cima alla coda.
     priority: Mapped[int] = mapped_column(default=0)
 
+    # Pausa/skip operativo: il pezzo resta nello storico del piano ma non
+    # entra piu' nella produzione automatica finche' non viene ripristinato.
+    skip_reason: Mapped[Optional[str]]
+    skipped_at: Mapped[Optional[dt.datetime]]
+
     created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(
         default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
@@ -180,6 +193,97 @@ class ContentPieceEvent(Base):
     detail: Mapped[Optional[str]]  # messaggio d'errore/nota, solo su "failed"
     duration_seconds: Mapped[Optional[float]]  # valorizzato solo su "completed"/"failed"
     timestamp: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+
+
+class GenerationPrompt(Base):
+    """Prompt realmente usato durante la produzione.
+
+    Serve per audit, debug, retry e diff tra tentativi. Non sostituisce gli
+    asset o la timeline: registra il testo che e' stato mandato al provider
+    esterno in uno stadio creativo (`image_regen`, `video_regen`, ecc.).
+    """
+
+    __tablename__ = "generation_prompts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_piece_id: Mapped[int] = mapped_column(ForeignKey("content_pieces.id"))
+    stage: Mapped[str]
+    provider: Mapped[str]
+    attempt: Mapped[int] = mapped_column(default=1)
+    prompt_text: Mapped[str]
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+
+
+class PlanTemplate(Base):
+    __tablename__ = "plan_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id"), nullable=True)
+    name: Mapped[str]
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+
+    items: Mapped[list["PlanTemplateItem"]] = relationship(back_populates="template")
+
+
+class PlanTemplateItem(Base):
+    __tablename__ = "plan_template_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(ForeignKey("plan_templates.id"))
+    content_type: Mapped[str]
+    scheduled_day: Mapped[str]
+    count: Mapped[int]
+    requested_source_category: Mapped[Optional[str]]
+
+    template: Mapped["PlanTemplate"] = relationship(back_populates="items")
+
+
+class CreativeRule(Base):
+    """Memoria leggera dei problemi creativi trasformati in regole future."""
+
+    __tablename__ = "creative_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rule_text: Mapped[str]
+    scope: Mapped[str] = mapped_column(default="general")
+    source_content_piece_id: Mapped[Optional[int]] = mapped_column(ForeignKey("content_pieces.id"), nullable=True)
+    status: Mapped[str] = mapped_column(default="active")  # "active" | "archived"
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+
+
+class TrackedInstagramProfile(Base):
+    __tablename__ = "tracked_instagram_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id"), nullable=True)
+    label: Mapped[str]
+    username: Mapped[str]
+    url: Mapped[str]
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)
+
+    snapshots: Mapped[list["InstagramProfileSnapshot"]] = relationship(back_populates="tracked_profile")
+
+
+class InstagramProfileSnapshot(Base):
+    __tablename__ = "instagram_profile_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tracked_profile_id: Mapped[int] = mapped_column(ForeignKey("tracked_instagram_profiles.id"))
+    captured_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+    followers_count: Mapped[Optional[int]]
+    following_count: Mapped[Optional[int]]
+    media_count: Mapped[Optional[int]]
+    best_video_url: Mapped[Optional[str]]
+    best_video_shortcode: Mapped[Optional[str]]
+    best_video_metric: Mapped[Optional[int]]
+    best_video_likes: Mapped[Optional[int]]
+    best_video_comments: Mapped[Optional[int]]
+    best_video_caption: Mapped[Optional[str]]
+    raw: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+    tracked_profile: Mapped["TrackedInstagramProfile"] = relationship(back_populates="snapshots")
 
 
 class PlanWeek(Base):

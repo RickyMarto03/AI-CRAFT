@@ -13,7 +13,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from aicraft.db.base import Base
-from aicraft.db.models import ContentPiece, ContentPieceEvent, Creator, CreditLedger, PlanWeek, Profile, ReferenceItem
+from aicraft.db.models import (
+    ContentPiece, ContentPieceEvent, Creator, CreditLedger, GenerationPrompt,
+    PlanWeek, Profile, ReferenceItem,
+)
 from aicraft.production import engine as engine_module
 from aicraft.production.higgsfield_client import GenerationResult
 
@@ -667,3 +670,88 @@ def test_run_once_produce_prima_i_pezzi_con_priorita_piu_alta(session, monkeypat
 
     assert processed[0] == piece_urgente.id
     assert processed[1] == piece_normale.id
+
+
+def test_run_once_rispetta_limite_numero_pezzi(session, monkeypatch):
+    creator = Creator(nome="Test Creator")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+    refs = [
+        ReferenceItem(source_url=f"https://www.instagram.com/p/LIMIT{i}/", status="ready", frame_paths=["/tmp/foto.jpg"], source_category="BOOBS", content_type_hint="carosello")
+        for i in range(2)
+    ]
+    pieces = [
+        ContentPiece(profile=profile, content_type="carosello", plan_week=plan, reference=refs[i], status="reference_ready")
+        for i in range(2)
+    ]
+    session.add_all([creator, profile, plan, *refs, *pieces])
+    session.commit()
+
+    processed = []
+    monkeypatch.setattr(engine_module, "process_content_piece", lambda s, p: processed.append(p.id))
+
+    result = engine_module.run_once(session, max_pieces=1)
+
+    assert processed == [pieces[0].id]
+    assert result["ready_before_limits"] == 2
+    assert result["skipped_by_limit"] == 1
+    assert result["processed"] == 1
+
+
+def test_run_once_rispetta_limite_crediti(session, monkeypatch):
+    creator = Creator(nome="Test Creator")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+    refs = [
+        ReferenceItem(source_url=f"https://www.instagram.com/p/CRED{i}/", status="ready", frame_paths=["/tmp/foto.jpg"], source_category="BOOBS", content_type_hint="carosello")
+        for i in range(2)
+    ]
+    pieces = [
+        ContentPiece(profile=profile, content_type="carosello", plan_week=plan, reference=refs[i], status="reference_ready")
+        for i in range(2)
+    ]
+    session.add_all([creator, profile, plan, *refs, *pieces])
+    session.commit()
+
+    processed = []
+    monkeypatch.setattr(engine_module, "process_content_piece", lambda s, p: processed.append(p.id))
+    monkeypatch.setattr(engine_module.budget_estimate, "estimate_content_type", lambda content_type, cache=None: 10.0)
+
+    result = engine_module.run_once(session, max_credits=10.0)
+
+    assert processed == [pieces[0].id]
+    assert result["estimated_selected_cost"] == 10.0
+    assert result["skipped_by_limit"] == 1
+
+
+def test_skip_e_restore_content_piece(session):
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    piece = ContentPiece(profile=profile, content_type="carosello", status="reference_ready")
+    session.add_all([creator, profile, piece])
+    session.commit()
+
+    skipped = engine_module.skip_content_piece(session, piece.id, reason="da rivedere")
+    assert skipped["status"] == "skipped"
+    assert piece.skip_reason == "da rivedere"
+    assert piece.skipped_at is not None
+
+    restored = engine_module.restore_content_piece(session, piece.id)
+    assert restored["status"] == "reference_ready"
+    assert piece.skip_reason is None
+    assert piece.skipped_at is None
+
+
+def test_record_prompt_incrementa_attempt_per_stadio(session):
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    piece = ContentPiece(profile=profile, content_type="carosello", status="reference_ready")
+    session.add_all([creator, profile, piece])
+    session.commit()
+
+    engine_module._record_prompt(session, piece, stage="image_regen", provider="soul", prompt_text="prompt v1")
+    engine_module._record_prompt(session, piece, stage="image_regen", provider="soul", prompt_text="prompt v2")
+
+    prompts = session.query(GenerationPrompt).filter_by(content_piece_id=piece.id).order_by(GenerationPrompt.id).all()
+    assert [p.attempt for p in prompts] == [1, 2]
+    assert [p.prompt_text for p in prompts] == ["prompt v1", "prompt v2"]

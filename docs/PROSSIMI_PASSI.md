@@ -36,7 +36,12 @@ retry singolo pezzo, retry con feedback sui rifiuti, lightbox QA, voto qualita',
 riordinabile, dry-run dettagliato, preview allocator, import manuale link, avviso duplicati,
 pulizia thumbnail orfane, alert budget, stima vs reale, backup DB, log scheduler in UI,
 versioning character, statistiche tempo per stadio, ricerca globale + ricerca backlog,
-health-check, timeline "oggi" unificata (§26).
+health-check, timeline "oggi" unificata (§26), fix PATH per app GUI (§27), secondo pacchetto
+feature operative + tracking profili Instagram pubblici (§28): morning brief, preset piano,
+controllo mix, suggerimento sync, stock/scadenze/quarantena reference, limiti di produzione,
+skip/restore pezzi, lineage prompt/costi/reference, diff prompt, copy pack, edit caption,
+regole creative, qualita' per categoria, riconciliazione job Higgsfield dopo errore `--wait`,
+tracking IG giornaliero con CLI/scheduler/UI.
 
 **L'utente ha confermato che il workflow di generazione per caroselli e video talking è
 "perfetto"** (visto sui 2 output reali del test §17) — non serve piu' lavorarci sopra a meno di
@@ -49,19 +54,28 @@ pianificare piano+budget prima di lanciare (costo per pezzo verificato: carosell
 talking ~36cr/8s, balletti ~18cr/10s — con 170 reference pronte un piano ampio potrebbe costare
 centinaia di crediti, va dimensionato insieme all'utente, non scelto a caso).
 
+Prossimi passi pratici dopo il §28:
+- Aggiungere in UI/CLI gli URL reali dei profili IG da tracciare e lanciare un primo
+  `tracking sync` reale controllato. I test usano un client finto, quindi non hanno verificato
+  rate-limit, login Instagram locale o profili privati.
+- Se il tracking reale e' ok, installare il LaunchAgent giornaliero
+  (`aicraft scheduler install-daily-tracking`) e controllare i log in Sistema dopo il primo run.
+- Aprire l'app e fare un giro manuale UI su tutte le nuove azioni (quarantena, preset piano,
+  lineage, copy pack, tracking), per verificare ergonomia e wording sul Mac reale.
+- Prima produzione su scala: resta da concordare con l'utente quanti pezzi/tipi/budget lanciare.
+  Non partire in autonomia.
+
 Altri candidati minori (non richiesti esplicitamente, bassa priorita'):
 - 38 reference `download_error` nelle ultime 2 settimane, ritentabili (ora anche con "Riprova
   tutti", vedi §23/§25) — non ancora ritentate.
 - Punti gia' noti in backlog/checklist precedenti (vedi sezione "Da migliorare" dell'app):
-  verifiche Higgsfield reali ancora mancanti (`video_references` su seedance_2_0, `image_reference`
-  remoto su motion control), riconciliazione job dopo un errore `--wait` (vedi §17).
+  verifiche Higgsfield reali ancora mancanti (`video_references` su seedance_2_0).
 
 ## Intenzioni discusse in chat, non ancora implementate
 
-- **Riconciliazione job dopo un errore `--wait`** (scoperta 15/07/2026 nel primo test reale, vedi
-  doc §17 e backlog app): un 503/timeout durante `--wait` puo' nascondere un job in realta'
-  riuscito e gia' addebitato. Serve controllare `higgsfield generate list` per un job dello stesso
-  tipo appena creato prima di arrendersi. Non implementato, solo annotato.
+- Nessuna intenzione discussa e confermata dall'utente e' rimasta fuori dal codice nel §28.
+  Restano solo verifiche reali/operative: primo sync tracking con account Instagram locale,
+  installazione scheduler giornaliero, test manuale UI e future generazioni su scala.
 
 ## Checklist "cosa manca per essere operativo al 100%" (TUTTA FATTA, stato 15/07/2026 sera)
 
@@ -91,6 +105,33 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 16/07/2026 (sessione Codex — secondo pacchetto feature operative + tracking IG)
+
+- L'utente ha confermato di voler implementare tutte le 20 feature aggiuntive proposte piu' una
+  nuova sezione "Tracking" per profili IG pubblici. Implementato backend + UI + CLI + scheduler.
+- Nuove aree operative: morning brief in Oggi, controllo mix piano, preset piano salvabili/
+  riapplicabili, suggerimento policy sync se mancano reference, stock/scadenze/quarantena in
+  Libreria, produzione limitata per numero pezzi/crediti, "prossimo 1", skip/restore pezzo,
+  edit caption/hashtag, copy pack, lineage completo reference->prompt->asset->crediti, diff tra
+  prompt, qualita' media per categoria e regole creative archiviate/attive.
+- Tracking IG pubblico: nuove tabelle `tracked_instagram_profiles` e `instagram_profile_snapshots`,
+  modulo `profile_tracking.py`, endpoint UI, comandi `aicraft tracking add/sync/report`, LaunchAgent
+  giornaliero (`com.aicraft.daily-profile-tracking`). Usa la sessione instagrapi locale gia' usata
+  per scaricare reference; non usa API private/business e non promette dati non pubblici.
+- Robustezza provider: `higgsfield_client` ora, se `generate create --wait` fallisce, prova a
+  riconciliare con `higgsfield generate list` e recupera un job recente completato dello stesso
+  modello prima di dichiarare errore.
+- Nuove migrazioni additive: quarantena su `reference_items`, skip su `content_pieces`, nuove
+  tabelle `generation_prompts`, `plan_templates`/`plan_template_items`, `creative_rules`,
+  `tracked_instagram_profiles`, `instagram_profile_snapshots`.
+- Test: 264 test verdi (`.venv/bin/python -m pytest -q`) + `node --check aicraft/desktop/web/app.js`
+  verde. Nessuna chiamata reale a Instagram/Google Sheet/Higgsfield durante i test.
+- Prossimo passo consigliato: aggiungere 1-2 profili IG reali in Tracking e lanciare un primo sync
+  manuale controllato; poi installare lo scheduler giornaliero se funziona.
+- Sessione chiusa su richiesta dell'utente: il pacchetto e' pronto per commit/push. Da riprendere
+  poi con validazione reale del Tracking, giro manuale UI e decisione sul primo batch di produzione
+  reale dimensionato per budget.
 
 ### 15/07/2026 notte, parte 6 (sessione Claude — fix PATH health-check CLI Claude)
 

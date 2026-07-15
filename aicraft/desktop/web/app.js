@@ -6,6 +6,7 @@ const state = {
   backlogFilter: 'aperto', backlogSearch: '',
   libFilter: { status: '', category: '', search: '', page: 0 },
   expandedPieceId: null, showMonthly: false, showAllocPreview: false, showDryRun: false,
+  expandedLineageId: null,
 };
 
 async function call(method, ...args) {
@@ -31,12 +32,12 @@ const PIECE_STATUS_LABELS = {
   reference_ready: 'Da produrre', image_regen: 'Foto in corso', video_regen: 'Video in corso',
   qa: 'QA in corso', caption_hashtag: 'Caption in corso', delivered: 'Consegnato',
   error: 'Errore', blocked_nsfw: 'Bloccato (NSFW)', too_long: 'Video troppo lungo',
-  content_refused: 'Rifiutato da Claude',
+  content_refused: 'Rifiutato da Claude', skipped: 'Saltato',
 };
 const PIECE_STATUS_BADGE = {
   reference_ready: 'gray', image_regen: 'amber', video_regen: 'amber', qa: 'amber',
   caption_hashtag: 'amber', delivered: 'green', error: 'red', blocked_nsfw: 'red', too_long: 'red',
-  content_refused: 'red',
+  content_refused: 'red', skipped: 'gray',
 };
 const REF_STATUS_BADGE = {
   ready: 'green', pending: 'gray', downloading: 'amber', transcribing: 'amber',
@@ -129,8 +130,8 @@ function chipStrip(items) {
 
 /* ============ Vista: Oggi ============ */
 VIEWS.oggi = async () => {
-  const [r, agenda, health, events] = await Promise.all([
-    call('overview'), call('today_agenda'), call('health_check'), call('today_events'),
+  const [r, agenda, health, events, brief] = await Promise.all([
+    call('overview'), call('today_agenda'), call('health_check'), call('today_events'), call('morning_brief'),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const o = r.overview;
@@ -161,7 +162,10 @@ VIEWS.oggi = async () => {
         </div>`).join('')}</div>`
     : '<div class="empty">Nessuna attività registrata oggi.</div>';
 
-  return head('Oggi', 'Panoramica rapida del tuo lavoro') + warnBanner +
+  const briefHtml = brief.ok ? `<div class="section-title">Checklist mattutina</div>
+    <div class="card">${brief.items.map((x) => `<div class="row" style="padding:4px 0"><span class="badge blue">check</span><span class="muted" style="flex:1">${esc(x)}</span></div>`).join('')}</div>` : '';
+
+  return head('Oggi', 'Panoramica rapida del tuo lavoro') + warnBanner + briefHtml +
     chipStrip([
       { label: 'Saldo', value: fmt(bal) + ' CR', color: bal < 0 ? '#ff6b5e' : '#8fe23a' },
       { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
@@ -267,6 +271,44 @@ VIEWS.creator = async () => {
     </div>`;
 };
 
+/* ============ Vista: Tracking IG ============ */
+VIEWS.tracking = async () => {
+  const r = await call('tracking_report');
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  const rows = r.profiles.length ? r.profiles.map((p) => {
+    const s = p.latest;
+    const delta = p.followers_delta;
+    return `<div class="card" style="margin-bottom:10px">
+      <div class="row">
+        <div><div class="p-name">${esc(p.label)} <span class="faint">@${esc(p.username)}</span></div>
+          <div class="faint">${s ? 'aggiornato ' + esc((s.captured_at || '').replace('T', ' ').slice(0, 19)) : 'nessuno snapshot ancora'}</div></div>
+        <div class="spacer"></div>
+        <span class="badge ${p.active ? 'green' : 'gray'}">${p.active ? 'attivo' : 'disattivo'}</span>
+        ${p.active ? `<button class="btn sm danger" data-action="tracking-disable" data-id="${p.id}">Disattiva</button>` : ''}
+      </div>
+      <div class="grid cols-4" style="margin-top:12px">
+        <div class="tile"><div class="t-label">Follower</div><div class="t-value num">${s ? s.followers_count : '—'}</div><div class="t-sub">${delta == null ? 'delta n/d' : (delta >= 0 ? '+' : '') + delta + ' dal precedente'}</div></div>
+        <div class="tile"><div class="t-label">Following</div><div class="t-value num">${s ? s.following_count : '—'}</div></div>
+        <div class="tile"><div class="t-label">Media</div><div class="t-value num">${s ? s.media_count : '—'}</div></div>
+        <div class="tile"><div class="t-label">Miglior video</div><div class="t-value num">${s && s.best_video_metric != null ? s.best_video_metric : '—'}</div><div class="t-sub">${s && s.best_video_url ? `<a href="${esc(s.best_video_url)}">${esc(s.best_video_shortcode || 'apri')}</a>` : 'nessun dato'}</div></div>
+      </div>
+      ${s && s.best_video_caption ? `<div class="faint" style="margin-top:10px">"${esc(s.best_video_caption)}"</div>` : ''}
+    </div>`;
+  }).join('') : '<div class="empty">Nessun profilo IG tracciato.</div>';
+
+  return head('Tracking', 'Mini report giornaliero dei profili Instagram pubblici',
+    '<button class="btn primary" data-action="tracking-sync">Aggiorna metriche</button>') +
+    `<div class="card" style="margin-bottom:16px">
+      <div class="row wrap">
+        <input id="trackingUrl" placeholder="URL profilo IG o @username" style="flex:2;min-width:220px" />
+        <input id="trackingLabel" placeholder="Etichetta (opzionale)" style="flex:1;min-width:160px" />
+        <button class="btn blue" data-action="tracking-add">Aggiungi profilo</button>
+      </div>
+      <div class="faint" style="margin-top:8px">Usa metriche pubbliche lette con la sessione Instagram locale gia' configurata.</div>
+    </div>
+    ${rows}`;
+};
+
 /* ============ Vista: Piano ============ */
 async function ensurePlan() {
   if (!state.profiles.length) {
@@ -315,6 +357,10 @@ VIEWS.piano = async () => {
   }
 
   const pl = state.currentPlan;
+  const [mixRes, templatesRes] = await Promise.all([
+    call('plan_mix_warnings', pl.id),
+    call('list_plan_templates', active.id),
+  ]);
   const statusBadge = pl.status === 'approvato' ? '<span class="badge green">Approvato</span>' : '<span class="badge amber">Bozza</span>';
   const days = state.meta.giorni;
   const cts = state.meta.content_types;
@@ -348,6 +394,7 @@ VIEWS.piano = async () => {
     <button class="btn sm blue" data-action="plan-assign-refs">Assegna reference</button>
     <button class="btn sm" data-action="plan-toggle-alloc-preview">${state.showAllocPreview ? 'Nascondi' : 'Anteprima'} assegnazione</button>
     <button class="btn sm" data-action="plan-duplicate" data-profile="${active.id}">Duplica come prossima settimana</button>
+    <button class="btn sm" data-action="plan-save-template">Salva preset</button>
     <button class="btn sm" data-action="plan-toggle-monthly">Vista mensile</button>
     <button class="btn danger sm" data-action="plan-reset">Azzera</button>
     <button class="btn primary" data-action="plan-approve">Approva piano →</button></div>`;
@@ -367,13 +414,22 @@ VIEWS.piano = async () => {
     const ap = await call('plan_allocation_preview', pl.id);
     allocPreviewHtml = ap.ok ? allocationPreviewSection(ap) : `<div class="empty">${esc(ap.error)}</div>`;
   }
+  const mixHtml = mixRes.ok && mixRes.warnings.length
+    ? `<div class="section-title">Controllo mix</div><div class="warn-list">${mixRes.warnings.map((w) => `<div class="warn">${esc(w)}</div>`).join('')}</div>`
+    : '';
+  const templateHtml = templatesRes.ok && templatesRes.templates.length
+    ? `<div class="section-title">Preset piano</div><div class="card"><div class="row wrap">
+        <select id="planTemplateSelect">${templatesRes.templates.map((t) => `<option value="${t.id}">${esc(t.name)} (${t.items})</option>`).join('')}</select>
+        <button class="btn sm" data-action="plan-apply-template-next">Applica alla prossima settimana</button>
+      </div></div>`
+    : '';
 
   return head('Piano', 'Calendario editoriale · ' + prettyDate(pl.week_start) + ' → ' + prettyDate(pl.week_end), actions) +
     updatedNote + weekNavHtml() +
     chipStrip(cts.map((ct) => ({ label: CT_LABELS[ct], value: pl.totals_by_type[ct], color: CT_COLORS[ct] }))
       .concat([{ label: 'Totale', value: pl.total, color: '#4c8bf5' }])) +
     `<div class="week-strip">${cards}</div>` +
-    monthlyHtml + allocPreviewHtml;
+    mixHtml + templateHtml + monthlyHtml + allocPreviewHtml;
 };
 
 function allocationPreviewSection(ap) {
@@ -450,6 +506,9 @@ VIEWS.produzione = async () => {
       <div class="row" style="margin-top:16px">
         <button class="btn primary" data-action="prod-preview">Avvia una prova senza costi</button>
         ${r.ready_count ? `<button class="btn" data-action="prod-toggle-dry-run">${state.showDryRun ? 'Nascondi' : 'Vedi'} dettaglio pezzi</button>` : ''}
+        <input id="prodMaxPieces" type="number" min="1" placeholder="max pezzi" style="width:92px" />
+        <input id="prodMaxCredits" type="number" min="0" step="0.1" placeholder="max CR" style="width:92px" />
+        <button class="btn" data-action="prod-run-next" ${(!r.ready_count || !covers) ? 'disabled' : ''}>Prossimo 1</button>
         <button class="btn danger" data-action="prod-run" ${(!r.ready_count || !covers) ? 'disabled' : ''}>Produci davvero</button>
       </div>
     </div></div></div>`;
@@ -475,6 +534,11 @@ VIEWS.produzione = async () => {
         const t = await call('piece_timeline', p.id);
         timelineHtml = t.ok ? timelineRows(t.events) : `<div class="empty">${esc(t.error)}</div>`;
       }
+      let lineageHtml = '';
+      if (state.expandedLineageId === p.id) {
+        const [lin, diff] = await Promise.all([call('piece_lineage', p.id), call('piece_prompt_diff', p.id, null)]);
+        lineageHtml = lin.ok ? lineageSection(lin, diff) : `<div class="empty">${esc(lin.error)}</div>`;
+      }
       const qualityOpts = [0, 1, 2, 3, 4, 5].map((n) =>
         `<option value="${n}" ${p.quality_rating === n || (!p.quality_rating && n === 0) ? 'selected' : ''}>${n === 0 ? 'voto…' : '★'.repeat(n)}</option>`).join('');
       return `<div class="card" style="margin-bottom:8px">
@@ -489,10 +553,16 @@ VIEWS.produzione = async () => {
         <div class="row wrap" style="margin-top:8px;gap:8px">
           ${PIECE_FAILURE_STATUSES.includes(p.status) ? `<button class="btn sm" data-action="piece-retry" data-id="${p.id}">Riprova${p.was_refused ? ' (prompt più prudente)' : ''}</button>` : ''}
           ${p.status === 'reference_ready' ? `<button class="btn sm" data-action="piece-bump-priority" data-id="${p.id}">Metti in cima alla coda</button>` : ''}
+          ${p.status === 'reference_ready' ? `<button class="btn sm" data-action="piece-skip" data-id="${p.id}">Salta</button>` : ''}
+          ${p.status === 'skipped' ? `<button class="btn sm" data-action="piece-restore" data-id="${p.id}">Ripristina</button>` : ''}
           ${p.status === 'delivered' ? `<select data-change="piece-quality" data-id="${p.id}" style="width:90px">${qualityOpts}</select>` : ''}
+          ${p.status === 'delivered' ? `<button class="btn sm" data-action="piece-edit-caption" data-id="${p.id}" data-caption="${esc(p.caption || '')}">Modifica caption</button>` : ''}
+          ${p.status === 'delivered' ? `<button class="btn sm" data-action="piece-copy-pack" data-id="${p.id}">Copia pack IG</button>` : ''}
+          <button class="btn sm" data-action="piece-toggle-lineage" data-id="${p.id}">Lineage</button>
           ${p.has_output ? `<button class="btn sm" data-action="piece-open-folder" data-id="${p.id}">Apri cartella</button>` : ''}
         </div>
         ${expanded ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">${timelineHtml}</div>` : ''}
+        ${lineageHtml ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">${lineageHtml}</div>` : ''}
       </div>`;
     }));
     piecesHtml = rows.join('');
@@ -512,6 +582,19 @@ VIEWS.produzione = async () => {
     <div class="section-title">Pezzi recenti (clicca per la timeline a checkpoint)</div>
     ${piecesHtml}`;
 };
+
+function lineageSection(lin, diff) {
+  const ref = lin.reference;
+  const promptRows = (lin.prompts || []).slice(-4).map((p) => `
+    <div class="row" style="padding:4px 0"><span class="badge blue">${esc(p.stage)}</span><span class="muted" style="flex:1">${esc(p.provider)} · tentativo ${p.attempt}</span><span class="faint">${esc((p.created_at || '').replace('T', ' ').slice(0, 19))}</span></div>
+    <pre class="faint" style="max-height:110px;overflow:auto;white-space:pre-wrap;font-size:10.5px">${esc((p.prompt_text || '').slice(0, 1200))}</pre>`).join('');
+  return `<div>
+    <div class="row"><b>Lineage</b><div class="spacer"></div>${ref ? `<span class="badge gray">ref #${ref.id} · ${esc(ref.category || '—')}</span>` : ''}</div>
+    ${ref ? `<div class="faint" style="margin-top:4px">${esc(ref.url || '')}${ref.caption ? ' · "' + esc(ref.caption.slice(0, 120)) + '"' : ''}</div>` : ''}
+    <div style="margin-top:8px">${promptRows || '<div class="faint">Nessun prompt salvato.</div>'}</div>
+    ${diff && diff.ok && diff.available ? `<div class="section-title">Diff ultimo retry</div><pre class="faint" style="max-height:180px;overflow:auto;white-space:pre-wrap;font-size:10.5px">${esc(diff.diff)}</pre>` : ''}
+  </div>`;
+}
 
 /* ============ Vista: Libreria ============ */
 function weeklyTrendRows(trend) {
@@ -599,11 +682,14 @@ const LIB_PAGE_SIZE = 50;
 
 VIEWS.libreria = async () => {
   const filter = state.libFilter || { status: '', category: '', search: '', page: 0 };
-  const [r, listed, trend, generated] = await Promise.all([
+  const [r, listed, trend, generated, stock, expiring, syncSug] = await Promise.all([
     call('reference_stats'),
     call('list_references', filter.status || null, filter.category || null, filter.search || null, LIB_PAGE_SIZE, (filter.page || 0) * LIB_PAGE_SIZE),
     call('reference_weekly_trend', 8),
     call('list_content_pieces', null, null, 20),
+    call('reference_stock'),
+    call('reference_expiring', 10),
+    call('sync_suggestion', state.currentPlan ? state.currentPlan.id : null),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const statusRows = Object.keys(r.by_status || {}).length
@@ -628,13 +714,14 @@ VIEWS.libreria = async () => {
         ${thumbBox(x.thumbnail_url, (x.source_category || '?')[0], 52, x.preview_kind, x.preview_url)}
         <div style="min-width:0">
           <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span>
-            ${x.content_type_hint === 'video' ? '<span class="badge gray">video</span>' : ''}${x.has_transcript ? '<span class="badge gray">trascrizione</span>' : ''}</div>
+            ${x.content_type_hint === 'video' ? '<span class="badge gray">video</span>' : ''}${x.has_transcript ? '<span class="badge gray">trascrizione</span>' : ''}${x.quarantined ? '<span class="badge red">quarantena</span>' : ''}${x.expires_in_days != null && x.expires_in_days <= 10 ? '<span class="badge amber">in scadenza</span>' : ''}</div>
           <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')}${x.error_message ? ' · ' + esc(x.error_message) : ''}</div>
           ${x.original_caption ? `<div class="faint" style="margin-top:2px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">"${esc(x.original_caption)}"</div>` : ''}
         </div>
         <div class="spacer"></div>
         ${x.retryable ? `<button class="btn sm" data-action="reference-retry" data-id="${x.id}">Riprova (${x.download_attempts}/${x.max_download_attempts})</button>`
           : REF_RETRYABLE_STATUSES.includes(x.status) ? `<span class="faint">Non disponibile · limite tentativi raggiunto</span>` : ''}
+        ${x.quarantined ? `<button class="btn sm" data-action="reference-unquarantine" data-id="${x.id}">Riabilita</button>` : `<button class="btn sm danger" data-action="reference-quarantine" data-id="${x.id}">Quarantena</button>`}
         ${x.has_local_media ? `<button class="btn sm" data-action="reference-open-folder" data-id="${x.id}">Apri cartella</button>` : ''}
       </div>`).join('')
     : '<div class="empty">Nessuna reference con questo filtro.</div>';
@@ -664,7 +751,14 @@ VIEWS.libreria = async () => {
       { label: 'In attesa', value: r.pending, color: '#e8b23d' },
       { label: 'Errore', value: r.error, color: '#ff6b5e' },
       { label: 'Vecchie', value: r.too_old, color: '#a0a7b8' },
+      { label: 'Quarantena', value: r.quarantined || 0, color: '#ff6b5e' },
     ]) + `
+    <div class="section-title">Scorta e prossime azioni</div>
+    <div class="grid cols-3">
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Scorta per categoria</div>${stock.ok ? Object.entries(stock.by_category).map(([c,n]) => `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${esc(c)}</span><span class="num">${n}</span></div>`).join('') : esc(stock.error)}</div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">In scadenza</div>${expiring.ok && expiring.references.length ? expiring.references.map((x) => `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${esc(x.category || '—')} #${x.id}</span><span class="badge amber">${x.days_left}g</span></div>`).join('') : '<div class="faint">Nessuna scadenza imminente.</div>'}</div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Sync suggerito</div>${syncSug.ok && Object.keys(syncSug.needs || {}).length ? `<div class="faint" style="margin-bottom:8px">${esc(syncSug.suggested_policy)}</div><button class="btn sm" data-action="references-sync-suggested" data-policy="${esc(syncSug.suggested_policy)}">Sync mirato</button>` : '<div class="faint">La libreria copre il piano corrente.</div>'}</div>
+    </div>
     <div class="section-title">Stato del magazzino</div>
     <div class="grid cols-3">
       <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per stato</div>${statusRows}</div>
@@ -722,12 +816,13 @@ function listedPagination(listed, filter) {
 VIEWS.costi = async () => {
   await ensurePlan();
   const planId = state.currentPlan ? state.currentPlan.id : null;
-  const [r, history, spendByType, projection, costCompare] = await Promise.all([
+  const [r, history, spendByType, projection, costCompare, qualityCat] = await Promise.all([
     call('budget_status', planId),
     call('ledger_history', 30),
     call('spend_by_content_type'),
     call('monthly_projection', 14),
     call('cost_estimate_vs_actual'),
+    call('quality_by_category'),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const alertBanner = r.budget_alert
@@ -778,6 +873,9 @@ VIEWS.costi = async () => {
           <span class="num" style="color:${b.delta > 0 ? 'var(--red)' : 'var(--green)'}">${b.delta > 0 ? '+' : ''}${fmt(b.delta)}${b.delta_pct != null ? ' (' + b.delta_pct.toFixed(0) + '%)' : ''}</span>
         </div>`).join('')
     : '<div class="empty">Nessun pezzo con stima e costo reale entrambi disponibili ancora.</div>';
+  const qualityRows = qualityCat.ok && Object.keys(qualityCat.categories).length
+    ? Object.entries(qualityCat.categories).map(([cat, b]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(cat)}</span><span class="num">${b.avg_rating.toFixed(1)}/5</span><span class="faint" style="margin-left:8px">${b.count} voti</span></div>`).join('')
+    : '<div class="empty">Ancora nessun voto qualità collegato a categorie.</div>';
 
   return head('Costi', 'Budget e crediti (fonte: CreditLedger)') + alertBanner + hero + `
     <div class="grid cols-4" style="margin-top:16px">
@@ -794,14 +892,16 @@ VIEWS.costi = async () => {
     <div class="card">${spendRows}</div>
     <div class="section-title">Stima vs reale (per tenere aggiornate le previsioni di costo)</div>
     <div class="card">${compareRows}</div>
+    <div class="section-title">Qualità media per categoria reference</div>
+    <div class="card">${qualityRows}</div>
     <div class="section-title">Storico movimenti (ultimi 30)</div>
     <div class="card">${historyRows}</div>`;
 };
 
 /* ============ Vista: Sistema ============ */
 VIEWS.sistema = async () => {
-  const [r, health, sched, charHist] = await Promise.all([
-    call('overview'), call('health_check'), call('scheduler_status'), call('character_history'),
+  const [r, health, sched, charHist, rules] = await Promise.all([
+    call('overview'), call('health_check'), call('scheduler_status'), call('character_history'), call('list_creative_rules', 'active'),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const o = r.overview;
@@ -834,6 +934,14 @@ VIEWS.sistema = async () => {
           <span class="faint" style="flex:1">${esc((v.created_at || '').replace('T', ' ').slice(0, 19))} · ${esc(v.mandatory_additions)}</span>
         </div>`).join('')}</div>`
     : '<div class="empty">Nessuno storico personaggio ancora.</div>';
+  const rulesHtml = rules.ok ? `<div class="card">
+      <div class="muted" style="font-weight:700;margin-bottom:10px">Regole creative attive</div>
+      ${(rules.rules || []).length ? rules.rules.map((rule) => `<div class="row" style="padding:5px 0;align-items:flex-start">
+        <span class="badge blue">${esc(rule.scope)}</span><span class="muted" style="flex:1">${esc(rule.rule_text)}</span>
+        <button class="btn sm" data-action="creative-rule-archive" data-id="${rule.id}">Archivia</button>
+      </div>`).join('') : '<div class="faint">Nessuna regola attiva.</div>'}
+      <div class="row" style="margin-top:10px"><input id="newCreativeRule" placeholder="Nuova regola creativa…" style="flex:1" /><button class="btn sm blue" data-action="creative-rule-add">Aggiungi</button></div>
+    </div>` : `<div class="empty">${esc(rules.error)}</div>`;
 
   return head('Sistema', 'Stato complessivo — legge lo stesso DB, nessuna logica duplicata',
     '<button class="btn" data-action="run-backup">Backup DB ora</button>') +
@@ -846,7 +954,9 @@ VIEWS.sistema = async () => {
       ${block('Piani per stato', o.piani_per_stato)}
       ${block('Content per stato', o.content_per_stato)}</div>
     <div class="section-title">Configurazione e automazioni</div>
-    <div class="grid cols-3">${healthHtml}${schedHtml}${charHtml}</div>`;
+    <div class="grid cols-3">${healthHtml}${schedHtml}${charHtml}</div>
+    <div class="section-title">Memoria creativa</div>
+    ${rulesHtml}`;
 };
 
 /* ============ Vista: Da migliorare (backlog) ============ */
@@ -953,6 +1063,21 @@ const ACTIONS = {
       state.currentPlan = null; state.planWeekStart = newWs; reloadPlanView();
     } else toast(r.error, 'err');
   },
+  'plan-save-template': async () => {
+    if (!state.currentPlan) return;
+    const name = prompt('Nome preset piano:', 'Preset ' + prettyDate(state.currentPlan.week_start));
+    if (!name) return;
+    const r = await call('save_plan_template', state.currentPlan.id, name);
+    r.ok ? (toast('Preset salvato'), reloadPlanView()) : toast(r.error, 'err');
+  },
+  'plan-apply-template-next': async () => {
+    if (!state.currentPlan) return;
+    const templateId = Number($('#planTemplateSelect')?.value);
+    const newWs = addDays(state.currentPlan.week_end, 1);
+    const newWe = addDays(newWs, 6);
+    const r = await call('apply_plan_template', templateId, state.activeProfileId, newWs, newWe);
+    if (r.ok) { toast('Preset applicato alla prossima settimana'); state.planWeekStart = newWs; state.currentPlan = r.plan; reloadPlanView(); } else toast(r.error, 'err');
+  },
   'plan-week-prev': () => {
     const ws = state.planWeekStart || (state.currentPlan ? state.currentPlan.week_start : currentWeek()[0]);
     state.planWeekStart = addDays(ws, -7);
@@ -1011,6 +1136,12 @@ const ACTIONS = {
       + (conflicts.length ? ` · attenzione: ${conflicts.length} URL con tab/categoria cambiati` : ''));
     setView('libreria');
   },
+  'references-sync-suggested': async (el) => {
+    const policy = el.dataset.policy;
+    toast('Sync mirato…');
+    const r = await call('references_sync_policy', policy);
+    r.ok ? (toast('Sync mirato completato · processati ' + (r.sync?.processed ?? '—')), setView('libreria')) : toast(r.error, 'err');
+  },
   'reference-import-manual': async () => {
     const url = ($('#manualRefUrl')?.value || '').trim();
     const tab = $('#manualRefTab')?.value;
@@ -1047,6 +1178,15 @@ const ACTIONS = {
     const r = await call('open_reference_folder', Number(el.dataset.id));
     r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
   },
+  'reference-quarantine': async (el) => {
+    const reason = prompt('Motivo quarantena reference:', 'non usare automaticamente') || '';
+    const r = await call('quarantine_reference', Number(el.dataset.id), reason);
+    r.ok ? (toast('Reference in quarantena'), setView('libreria')) : toast(r.error, 'err');
+  },
+  'reference-unquarantine': async (el) => {
+    const r = await call('unquarantine_reference', Number(el.dataset.id));
+    r.ok ? (toast('Reference riabilitata'), setView('libreria')) : toast(r.error, 'err');
+  },
   'piece-open-folder': async (el) => {
     const r = await call('open_piece_folder', Number(el.dataset.id));
     r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
@@ -1059,13 +1199,23 @@ const ACTIONS = {
     const ok = confirm('Produzione reale: usera crediti Higgsfield/Claude sui contenuti pronti. Vuoi continuare?');
     if (!ok) return;
     toast('Produzione reale avviata…');
-    const r = await call('production_run', null, 'PRODUCI');
+    const maxPieces = parseInt($('#prodMaxPieces')?.value || '', 10) || null;
+    const maxCredits = parseFloat($('#prodMaxCredits')?.value || '') || null;
+    const r = await call('production_run', null, 'PRODUCI', maxPieces, maxCredits);
     if (r.ok) {
       const p = r.production || {};
       toast('Produzione completata · consegnati ' + (p.delivered ?? 0) + ' · falliti ' + (p.failed ?? 0));
       refreshBalance();
       setView('produzione');
     } else toast(r.error, 'err');
+  },
+  'prod-run-next': async () => {
+    const ok = confirm('Produrre solo il prossimo contenuto in coda?');
+    if (!ok) return;
+    toast('Produco il prossimo contenuto…');
+    const r = await call('production_run', null, 'PRODUCI', 1, null);
+    if (r.ok) { const p = r.production || {}; toast('Prossimo completato · consegnati ' + (p.delivered ?? 0)); refreshBalance(); setView('produzione'); }
+    else toast(r.error, 'err');
   },
   'piece-toggle-timeline': (el) => {
     const id = Number(el.dataset.id);
@@ -1125,12 +1275,66 @@ const ACTIONS = {
     const r = await call('bump_piece_priority', Number(el.dataset.id));
     r.ok ? (toast('Pezzo messo in cima alla coda'), setView(state.view)) : toast(r.error, 'err');
   },
+  'piece-skip': async (el) => {
+    const reason = prompt('Perche saltare questo pezzo?', 'rimandato manualmente') || '';
+    const r = await call('skip_content_piece', Number(el.dataset.id), reason);
+    r.ok ? (toast('Pezzo saltato'), setView('produzione')) : toast(r.error, 'err');
+  },
+  'piece-restore': async (el) => {
+    const r = await call('restore_content_piece', Number(el.dataset.id));
+    r.ok ? (toast('Pezzo ripristinato'), setView('produzione')) : toast(r.error, 'err');
+  },
+  'piece-toggle-lineage': (el) => {
+    const id = Number(el.dataset.id);
+    state.expandedLineageId = state.expandedLineageId === id ? null : id;
+    setView('produzione');
+  },
+  'piece-edit-caption': async (el) => {
+    const id = Number(el.dataset.id);
+    const caption = prompt('Caption finale:', el.dataset.caption || '');
+    if (caption == null) return;
+    const hashtags = prompt('Hashtag separati da spazio:', '') || '';
+    const r = await call('update_piece_caption', id, caption, hashtags);
+    r.ok ? (toast('Caption aggiornata'), setView('produzione')) : toast(r.error, 'err');
+  },
+  'piece-copy-pack': async (el) => {
+    const r = await call('copy_pack', Number(el.dataset.id));
+    if (!r.ok) return toast(r.error, 'err');
+    if (navigator.clipboard) await navigator.clipboard.writeText(r.text);
+    toast('Pack IG copiato');
+  },
   'plan-toggle-alloc-preview': () => { state.showAllocPreview = !state.showAllocPreview; reloadPlanView(); },
   'prod-toggle-dry-run': () => { state.showDryRun = !state.showDryRun; setView('produzione'); },
   'run-backup': async () => {
     toast('Backup in corso…');
     const r = await call('run_backup');
     r.ok ? toast('Backup salvato: ' + r.path) : toast('Backup non riuscito: ' + (r.reason || r.error || '—'), 'err');
+  },
+  'tracking-add': async () => {
+    const url = ($('#trackingUrl')?.value || '').trim();
+    const label = ($('#trackingLabel')?.value || '').trim() || null;
+    if (!url) return toast('Inserisci URL o username', 'err');
+    const r = await call('add_tracked_profile', url, label, state.activeProfileId || null);
+    r.ok ? (toast('Profilo tracciato'), setView('tracking')) : toast(r.error, 'err');
+  },
+  'tracking-sync': async () => {
+    toast('Aggiorno metriche IG…');
+    const r = await call('sync_tracked_profiles');
+    r.ok ? (toast('Tracking aggiornato · ' + (r.synced?.length || 0) + ' profili'), setView('tracking')) : toast(r.error, 'err');
+  },
+  'tracking-disable': async (el) => {
+    const r = await call('deactivate_tracked_profile', Number(el.dataset.id));
+    r.ok ? (toast('Tracking disattivato'), setView('tracking')) : toast(r.error, 'err');
+  },
+  'creative-rule-add': async () => {
+    const text = ($('#newCreativeRule')?.value || '').trim();
+    if (!text) return toast('Inserisci una regola', 'err');
+    const r = await call('add_creative_rule', text, 'general', null);
+    r.ok ? (toast('Regola salvata'), setView('sistema')) : toast(r.error, 'err');
+  },
+  'creative-rule-archive': async (el) => {
+    const r = await call('archive_creative_rule', Number(el.dataset.id));
+    r.ok ? (toast('Regola archiviata'), setView('sistema')) : toast(r.error, 'err');
   },
 };
 
@@ -1174,7 +1378,12 @@ document.addEventListener('change', async (e) => {
     const rating = Number(quality.value);
     if (!rating) return;
     const r = await call('set_piece_quality', Number(quality.dataset.id), rating);
-    r.ok ? toast('Voto salvato') : toast(r.error, 'err');
+    if (!r.ok) return toast(r.error, 'err');
+    toast('Voto salvato');
+    if (rating <= 2) {
+      const note = prompt('Vuoi trasformare questo problema in una regola futura?', 'Evita questo tipo di resa nei contenuti simili');
+      if (note) await call('suggest_rule_from_piece', Number(quality.dataset.id), note);
+    }
   }
 });
 document.addEventListener('keydown', (e) => {

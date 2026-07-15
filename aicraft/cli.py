@@ -37,6 +37,7 @@ from .budget.errors import BudgetInsufficientError
 from .db.base import SessionLocal, init_db
 from .db.models import ContentPiece, PlanWeek, Profile
 from .planning import plan as planning
+from . import profile_tracking
 from .profiles import manager as profiles
 from .reference_sync import allocator
 from . import reporting
@@ -245,6 +246,42 @@ def cmd_scheduler_install_weekly_sync(session, args):
     print("Per caricarlo: launchctl load ~/Library/LaunchAgents/com.aicraft.weekly-reference-sync.plist")
 
 
+def cmd_scheduler_install_daily_tracking(session, args):
+    from . import scheduler
+
+    path = scheduler.install_daily_tracking(hour=args.hour, minute=args.minute)
+    print(f"LaunchAgent scritto: {path}")
+    print("Per caricarlo: launchctl load ~/Library/LaunchAgents/com.aicraft.daily-profile-tracking.plist")
+
+
+def cmd_tracking_add(session, args):
+    tracked = profile_tracking.add_tracked_profile(session, url_or_username=args.url, label=args.label)
+    print(f"Profilo tracking aggiunto: [{tracked.id}] @{tracked.username} ({tracked.label})")
+
+
+def cmd_tracking_sync(session, args):
+    result = profile_tracking.sync_all(session)
+    print(f"Tracking aggiornato: {len(result['synced'])} ok, {len(result['errors'])} errori")
+    for err in result["errors"]:
+        print(f"  ERRORE @{err['username']}: {err['error']}")
+
+
+def cmd_tracking_report(session, args):
+    result = profile_tracking.report(session)
+    if not result["profiles"]:
+        print("Nessun profilo tracciato.")
+        return
+    for row in result["profiles"]:
+        snap = row["latest"] or {}
+        delta = row["followers_delta"]
+        delta_text = "n/d" if delta is None else f"{delta:+d}"
+        print(
+            f"@{row['username']} — follower {snap.get('followers_count', '—')} "
+            f"({delta_text}), media {snap.get('media_count', '—')}, "
+            f"best video {snap.get('best_video_metric', '—')}"
+        )
+
+
 def select_pieces(plan_id):
     from sqlalchemy import select
 
@@ -333,6 +370,19 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--hour", type=int, default=9)
     a.add_argument("--minute", type=int, default=0)
     a.set_defaults(func=cmd_scheduler_install_weekly_sync)
+    a = sched_sub.add_parser("install-daily-tracking", help="Installa LaunchAgent per tracking IG giornaliero")
+    a.add_argument("--hour", type=int, default=8)
+    a.add_argument("--minute", type=int, default=30)
+    a.set_defaults(func=cmd_scheduler_install_daily_tracking)
+
+    p_track = sub.add_parser("tracking", help="Tracking profili Instagram pubblici")
+    track_sub = p_track.add_subparsers(dest="sub", required=True)
+    a = track_sub.add_parser("add", help="Aggiunge un profilo IG al tracking")
+    a.add_argument("url")
+    a.add_argument("--label", default=None)
+    a.set_defaults(func=cmd_tracking_add)
+    track_sub.add_parser("sync", help="Aggiorna snapshot dei profili tracciati").set_defaults(func=cmd_tracking_sync)
+    track_sub.add_parser("report", help="Mini report tracking").set_defaults(func=cmd_tracking_report)
 
     a = sub.add_parser("produce", help="Esegue la produzione sui piani approvati")
     a.add_argument("--plan", type=int, default=None, help="limita la produzione a un piano approvato")

@@ -59,3 +59,12 @@ def test_cli_scheduler_plist(cli_env, capsys):
     out = capsys.readouterr().out
     assert "com.aicraft.weekly-reference-sync" in out
     assert "sync-policy" in out
+
+
+def test_cli_tracking_add_e_report(cli_env, capsys):
+    cli.main(["tracking", "add", "https://www.instagram.com/RubyWilde/", "--label", "Ruby Wilde"])
+    cli.main(["tracking", "report"])
+
+    out = capsys.readouterr().out
+    assert "@rubywilde" in out
+    assert "n/d" in out

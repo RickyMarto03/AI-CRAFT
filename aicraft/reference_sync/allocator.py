@@ -76,6 +76,7 @@ def select_candidates(
         .where(
             ReferenceItem.status == "ready",
             ReferenceItem.source_category.in_(categories),
+            ReferenceItem.quarantined.is_(False),
             ReferenceItem.id.not_in(blocked_ids) if blocked_ids else ReferenceItem.id.is_not(None),
         )
     )

@@ -1,0 +1,12 @@
+SQLAlchemy>=2.0
+gspread>=6.0
+google-auth>=2.28
+instagrapi>=2.0
+browser_cookie3>=0.19
+faster-whisper>=1.0
+python-dotenv>=1.0
+pywebview>=5.0
+# pinnato a 4.x: la 5.0 non include piu' i file dei rilevatori Haar Cascade
+# nel pacchetto (verificato il 15/07/2026), 4.x e' la linea stabile nota-buona
+opencv-python==4.13.0.92
+pytest>=8.0

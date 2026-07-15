@@ -1,0 +1,285 @@
+"""Bridge Python<->JS per l'app desktop (PyWebView).
+
+Ogni metodo pubblico di `Api` e' invocabile dal frontend via
+`window.pywebview.api.<metodo>(...)` e ritorna dati JSON-serializzabili letti
+dal backend reale. Nessuna logica di dominio nuova qui: si orchestra soltanto
+(reporting, profiles, budget, planning, reference_sync). Ogni metodo apre e
+chiude la propria sessione DB.
+
+I metodi sono progettati per non sollevare eccezioni verso JS: ritornano
+`{"ok": True, ...}` oppure `{"ok": False, "error": "..."}`, cosi' il
+frontend puo' mostrare messaggi puliti.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import functools
+import logging
+
+from .. import backlog, reporting
+from ..budget import estimate as budget_estimate
+from ..budget import ledger as budget_ledger
+from ..budget import sync as budget_sync
+from ..budget.errors import BudgetInsufficientError
+from ..db.base import SessionLocal, init_db
+from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
+from ..planning import plan as planning
+from ..planning.quota import GIORNI_VALIDI
+from ..production import pipeline_spec
+from ..profiles import manager as profiles
+
+logger = logging.getLogger(__name__)
+
+CONTENT_TYPES = ["video_talking", "video_balletti", "video_caption", "carosello", "stories"]
+
+
+def _endpoint(fn):
+    """Wrappa un metodo API: apre sessione, committa, cattura eccezioni in {ok:False}."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            with SessionLocal() as session:
+                result = fn(self, session, *args, **kwargs)
+                session.commit()
+                if isinstance(result, dict) and "ok" not in result:
+                    result = {"ok": True, **result}
+                return result
+        except BudgetInsufficientError as exc:
+            return {"ok": False, "error": str(exc), "kind": "budget", "needed": exc.needed, "available": exc.available}
+        except Exception as exc:  # noqa: BLE001 — il frontend deve ricevere sempre una risposta
+            logger.exception("Errore in endpoint %s", fn.__name__)
+            return {"ok": False, "error": str(exc)}
+
+    return wrapper
+
+
+def _profile_dict(p: Profile) -> dict:
+    return {"id": p.id, "nome": p.nome, "tipo_contenuto": p.tipo_contenuto, "attivo": p.attivo, "creator_id": p.creator_id}
+
+
+def _plan_grid(session, plan: PlanWeek) -> dict:
+    pieces = session.query(ContentPiece).filter(ContentPiece.plan_week_id == plan.id).all()
+    grid = {ct: {g: 0 for g in GIORNI_VALIDI} for ct in CONTENT_TYPES}
+    for p in pieces:
+        if p.content_type in grid and p.scheduled_day in grid[p.content_type]:
+            grid[p.content_type][p.scheduled_day] += 1
+    totals_by_type = {ct: sum(grid[ct].values()) for ct in CONTENT_TYPES}
+    totals_by_day = {g: sum(grid[ct][g] for ct in CONTENT_TYPES) for g in GIORNI_VALIDI}
+    return {
+        "id": plan.id,
+        "profile_id": plan.profile_id,
+        "week_start": plan.week_start.isoformat(),
+        "week_end": plan.week_end.isoformat(),
+        "status": plan.status,
+        "version": plan.version,
+        "grid": grid,
+        "totals_by_type": totals_by_type,
+        "totals_by_day": totals_by_day,
+        "total": sum(totals_by_type.values()),
+    }
+
+
+class Api:
+    # --- dashboard / sistema ---
+
+    @_endpoint
+    def overview(self, session):
+        return {"overview": reporting.overview(session)}
+
+    # --- profili (Creator) ---
+
+    @_endpoint
+    def list_profiles(self, session):
+        active = profiles.get_active_profile(session)
+        creators = {c.id: c.nome for c in profiles.list_creators(session)}
+        rows = []
+        for p in profiles.list_profiles(session):
+            d = _profile_dict(p)
+            d["creator"] = creators.get(p.creator_id)
+            d["is_active"] = active is not None and p.id == active.id
+            rows.append(d)
+        return {"profiles": rows, "creators": [{"id": cid, "nome": nome} for cid, nome in creators.items()]}
+
+    @_endpoint
+    def create_creator(self, session, nome):
+        c = profiles.create_creator(session, nome)
+        return {"creator": {"id": c.id, "nome": c.nome}}
+
+    @_endpoint
+    def create_profile(self, session, creator_id, nome, tipo):
+        p = profiles.create_profile(session, creator_id=int(creator_id), nome=nome, tipo_contenuto=tipo)
+        return {"profile": _profile_dict(p)}
+
+    @_endpoint
+    def set_active_profile(self, session, profile_id):
+        p = profiles.set_active_profile(session, int(profile_id))
+        return {"profile": _profile_dict(p)}
+
+    @_endpoint
+    def delete_profile(self, session, profile_id, force=False):
+        profiles.delete_profile(session, int(profile_id), force=bool(force))
+        return {}
+
+    # --- budget (Costi) ---
+
+    @_endpoint
+    def budget_status(self, session, plan_id=None):
+        balance = budget_ledger.current_balance(session)
+        data = {"balance": balance}
+        if plan_id is not None:
+            plan = session.get(PlanWeek, int(plan_id))
+            if plan is not None:
+                estimated = budget_estimate.estimate_plan(session, plan, persist=False)
+                data.update({
+                    "plan_cost": estimated,
+                    "coverage": balance - estimated,
+                    "covers": balance >= estimated,
+                })
+        return data
+
+    @_endpoint
+    def budget_topup(self, session, credits, motivo="ricarica"):
+        budget_ledger.record_topup(session, credits=float(credits), motivo=motivo)
+        return {"balance": budget_ledger.current_balance(session)}
+
+    @_endpoint
+    def budget_sync(self, session):
+        result = budget_sync.sync_from_higgsfield(session)
+        result["balance"] = budget_ledger.current_balance(session)
+        return result
+
+    # --- referenze (Libreria) ---
+
+    @_endpoint
+    def reference_stats(self, session):
+        rows = session.query(ReferenceItem).all()
+        by_status: dict = {}
+        for r in rows:
+            by_status[r.status] = by_status.get(r.status, 0) + 1
+        return {
+            "total": len(rows),
+            "by_status": by_status,
+            "ready": by_status.get("ready", 0),
+            "pending": by_status.get("pending", 0),
+            "error": by_status.get("error", 0),
+        }
+
+    # --- piano (Piano) ---
+
+    @_endpoint
+    def list_plans(self, session, profile_id=None):
+        q = session.query(PlanWeek)
+        if profile_id is not None:
+            q = q.filter(PlanWeek.profile_id == int(profile_id))
+        plans = q.order_by(PlanWeek.week_start.desc()).all()
+        return {"plans": [
+            {"id": p.id, "profile_id": p.profile_id, "week_start": p.week_start.isoformat(),
+             "week_end": p.week_end.isoformat(), "status": p.status, "version": p.version}
+            for p in plans
+        ]}
+
+    @_endpoint
+    def create_plan(self, session, profile_id, week_start, week_end):
+        plan = planning.create_plan_week(
+            session,
+            profile_id=int(profile_id),
+            week_start=dt.date.fromisoformat(week_start),
+            week_end=dt.date.fromisoformat(week_end),
+        )
+        return {"plan": _plan_grid(session, plan)}
+
+    @_endpoint
+    def get_plan(self, session, plan_id):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        return {"plan": _plan_grid(session, plan)}
+
+    @_endpoint
+    def plan_set_cell(self, session, plan_id, content_type, giorno, target):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        planning.set_cell_count(session, plan, content_type=content_type, scheduled_day=giorno, target=int(target))
+        return {"plan": _plan_grid(session, plan)}
+
+    @_endpoint
+    def approve_plan(self, session, plan_id):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        estimated = planning.approve_plan(session, plan)
+        return {"plan": _plan_grid(session, plan), "estimated": estimated, "balance": budget_ledger.current_balance(session)}
+
+    # --- produzione (Produzione) — solo dry-run per sicurezza ---
+
+    @_endpoint
+    def production_preview(self, session, plan_id=None):
+        """Anteprima SENZA COSTI di cosa verrebbe prodotto (pezzi pronti di piani
+        approvati) e stima crediti. Non genera nulla, non spende (equivalente
+        di 'Avvia una prova senza costi' degli screenshot)."""
+        q = (
+            session.query(ContentPiece)
+            .join(PlanWeek, ContentPiece.plan_week_id == PlanWeek.id)
+            .filter(ContentPiece.status == "reference_ready", PlanWeek.status == "approvato")
+        )
+        if plan_id is not None:
+            q = q.filter(ContentPiece.plan_week_id == int(plan_id))
+        pieces = q.all()
+        cache: dict = {}
+        stima = 0.0
+        by_type: dict = {}
+        for p in pieces:
+            c = budget_estimate.estimate_content_type(p.content_type, cache=cache)
+            stima += c
+            by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
+        balance = budget_ledger.current_balance(session)
+        return {
+            "ready_count": len(pieces),
+            "by_type": by_type,
+            "estimated_cost": stima,
+            "balance": balance,
+            "covers": balance >= stima,
+        }
+
+    # --- backlog (Da migliorare) ---
+
+    @_endpoint
+    def list_backlog(self, session, status="aperto"):
+        status_filter = None if status == "tutti" else status
+        notes = backlog.list_notes(session, status=status_filter)
+        return {"notes": [
+            {
+                "id": n.id, "created_at": n.created_at.isoformat(), "category": n.category,
+                "title": n.title, "description": n.description, "status": n.status,
+            }
+            for n in notes
+        ]}
+
+    @_endpoint
+    def add_backlog_note(self, session, category, title, description=""):
+        note = backlog.add_note(session, category=category, title=title, description=description)
+        return {"note": {"id": note.id}}
+
+    @_endpoint
+    def set_backlog_status(self, session, note_id, status):
+        backlog.set_status(session, int(note_id), status)
+        return {}
+
+    # --- costanti utili al frontend ---
+
+    @_endpoint
+    def meta(self, session):
+        return {
+            "content_types": CONTENT_TYPES,
+            "giorni": list(GIORNI_VALIDI),
+            "tipi_profilo": list(profiles.TIPI_CONTENUTO_VALIDI),
+            "pipeline": {ct: [op.stage for op in pipeline_spec.generation_ops(ct)] for ct in CONTENT_TYPES},
+        }
+
+
+def get_api() -> Api:
+    init_db()
+    return Api()

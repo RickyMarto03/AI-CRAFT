@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI-craft — Centro di Comando</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="tb-brand">
+        <div class="tb-mark">AI</div>
+        <div class="tb-name">AI-CRAFT<span>Centro di Comando</span></div>
+      </div>
+
+      <nav class="tabs" id="tabs">
+        <button class="tab" data-view="oggi">Oggi</button>
+        <button class="tab" data-view="piano">Piano</button>
+        <button class="tab" data-view="produzione">Produzione</button>
+        <button class="tab" data-view="creator">Creator</button>
+        <button class="tab" data-view="libreria">Libreria</button>
+        <button class="tab" data-view="costi">Costi</button>
+        <button class="tab" data-view="backlog">Da migliorare</button>
+        <button class="tab" data-view="sistema">Sistema</button>
+      </nav>
+
+      <div class="tb-right">
+        <select id="topProfileSwitch" class="profile-switch" data-change="switch-profile-top">
+          <option value="">— nessun profilo —</option>
+        </select>
+        <div class="balance-pill" id="balancePill">
+          <span class="bp-dot"></span><span id="balancePillValue" class="num">—</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div id="view"><div class="loading">Avvio…</div></div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

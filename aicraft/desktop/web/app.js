@@ -1,0 +1,490 @@
+'use strict';
+
+/* ============ Bridge & stato ============ */
+const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto' };
+
+async function call(method, ...args) {
+  try {
+    const res = await window.pywebview.api[method](...args);
+    return res || { ok: false, error: 'nessuna risposta' };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/* ============ Etichette ============ */
+const CT_LABELS = {
+  video_talking: 'Video Talking', video_balletti: 'Video Balletti',
+  video_caption: 'Video Caption', carosello: 'Caroselli', stories: 'Stories',
+};
+const CT_COLORS = { video_talking: '#8fe23a', video_balletti: '#ff6b5e', video_caption: '#4c8bf5', carosello: '#7ee787', stories: '#e8b23d' };
+const DAY_LABELS = { lun: 'Lun', mar: 'Mar', mer: 'Mer', gio: 'Gio', ven: 'Ven', sab: 'Sab', dom: 'Dom' };
+const TIPO_LABELS = { solo_talking: 'Solo talking', solo_balletti: 'Solo balletti', misto: 'Misto' };
+const BACKLOG_STATUS_LABELS = { aperto: 'Aperto', fatto: 'Fatto', scartato: 'Scartato', tutti: 'Tutti' };
+const BACKLOG_STATUS_BADGE = { aperto: 'amber', fatto: 'green', scartato: 'gray' };
+
+/* ============ Utility ============ */
+const $ = (sel, root = document) => root.querySelector(sel);
+const fmt = (n) => (n == null ? '—' : Number(n).toFixed(2));
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function toast(msg, kind = 'ok') {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + kind;
+  setTimeout(() => { t.className = 'toast ' + kind; }, 2600);
+}
+
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+function currentWeek() {
+  const now = new Date();
+  const dow = (now.getDay() + 6) % 7;
+  const mon = new Date(now); mon.setDate(now.getDate() - dow);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  return [isoDate(mon), isoDate(sun)];
+}
+function prettyDate(iso) { const [y, m, d] = iso.split('-'); return `${d}-${m}-${y}`; }
+function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return isoDate(d); }
+function dayNum(iso) { return iso.split('-')[2]; }
+
+/* ============ Balance pill (topbar) ============ */
+async function refreshBalance() {
+  const r = await call('budget_status');
+  if (!r.ok) return;
+  const pill = $('#balancePill');
+  pill.className = 'balance-pill ' + (r.balance < 0 ? 'neg' : r.balance < 50 ? 'low' : '');
+  $('#balancePillValue').textContent = fmt(r.balance) + ' CR';
+}
+
+async function refreshTopProfileSwitch() {
+  const sel = $('#topProfileSwitch');
+  if (!state.profiles.length) {
+    const r = await call('list_profiles');
+    if (r.ok) state.profiles = r.profiles;
+  }
+  const active = state.profiles.find((p) => p.is_active);
+  sel.innerHTML = state.profiles.length
+    ? state.profiles.map((p) => `<option value="${p.id}" ${active && p.id === active.id ? 'selected' : ''}>${esc(p.nome)}</option>`).join('')
+    : '<option value="">— nessun profilo —</option>';
+}
+
+/* ============ Router ============ */
+const VIEWS = {};
+async function setView(name) {
+  state.view = name;
+  document.querySelectorAll('.tab').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
+  const root = $('#view');
+  root.innerHTML = '<div class="loading">Carico…</div>';
+  try {
+    root.innerHTML = await VIEWS[name]();
+  } catch (e) {
+    root.innerHTML = `<div class="empty">Errore nel caricamento: ${esc(e)}</div>`;
+  }
+}
+
+function head(title, sub, actions = '') {
+  return `<div class="page-head">
+    <div><h1 class="page-title">${title}</h1><div class="page-sub">${sub}</div></div>
+    <div class="spacer"></div>${actions}</div>`;
+}
+
+function chipStrip(items) {
+  // items: [{label, value, color}]
+  return `<div class="chip-strip">${items.map((i) =>
+    `<div class="chip"><span class="c-dot" style="background:${i.color || '#4c8bf5'}"></span>${esc(i.label)}
+      <span class="c-val num">${i.value}</span></div>`).join('')}</div>`;
+}
+
+/* ============ Vista: Oggi ============ */
+VIEWS.oggi = async () => {
+  const r = await call('overview');
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  const o = r.overview;
+  const cp = o.content_per_stato || {};
+  const totContent = Object.values(cp).reduce((a, b) => a + b, 0);
+  const delivered = cp['delivered'] || 0;
+  const bal = o.saldo_crediti;
+  return head('Oggi', 'Panoramica rapida del tuo lavoro') +
+    chipStrip([
+      { label: 'Saldo', value: fmt(bal) + ' CR', color: bal < 0 ? '#ff6b5e' : '#8fe23a' },
+      { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
+      { label: 'Contenuti', value: totContent + ' (' + delivered + ' consegnati)' },
+      { label: 'Reference', value: Object.values(o.reference_per_stato || {}).reduce((a, b) => a + b, 0), color: '#e8b23d' },
+    ]) + `
+    <div class="section-title">Profili</div>
+    ${o.profili.length ? '<div class="plist">' + o.profili.map((p) => `
+      <div class="prow ${p.attivo ? '' : ''}">
+        <div class="p-avatar">${esc((p.nome[0] || '?').toUpperCase())}</div>
+        <div><div class="p-name">${esc(p.nome)}</div><div class="faint">${TIPO_LABELS[p.tipo_contenuto] || p.tipo_contenuto}</div></div>
+        <div class="spacer"></div>
+        <span class="badge ${p.attivo ? 'green' : 'gray'}">${p.attivo ? 'attivo' : 'disabilitato'}</span>
+      </div>`).join('') + '</div>' : '<div class="empty">Nessun profilo. Vai su <b>Creator</b> per crearne uno.</div>'}
+  `;
+};
+
+/* ============ Vista: Creator ============ */
+VIEWS.creator = async () => {
+  const r = await call('list_profiles');
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  state.profiles = r.profiles;
+  const creatorsOpts = r.creators.map((c) => `<option value="${c.id}">${esc(c.nome)}</option>`).join('');
+  const tipiOpts = (state.meta?.tipi_profilo || []).map((t) => `<option value="${t}">${TIPO_LABELS[t] || t}</option>`).join('');
+  return head('Creator', 'Profili gestiti e loro stato') +
+    chipStrip([
+      { label: 'Profili', value: r.profiles.length, color: '#8fe23a' },
+      { label: 'Attivi', value: r.profiles.filter((p) => p.attivo).length },
+      { label: 'Creator', value: r.creators.length, color: '#4c8bf5' },
+    ]) + `
+    <div class="section-title">Profili gestiti</div>
+    ${r.profiles.length ? '<div class="plist">' + r.profiles.map((p) => `
+      <div class="prow ${p.is_active ? 'active' : ''}">
+        <div class="p-avatar">${esc((p.nome[0] || '?').toUpperCase())}</div>
+        <div><div class="p-name">${esc(p.nome)} ${p.is_active ? '<span class="badge green">selezionato</span>' : ''}</div>
+          <div class="faint">${TIPO_LABELS[p.tipo_contenuto] || p.tipo_contenuto} · ${esc(p.creator || '')}</div></div>
+        <div class="spacer"></div>
+        ${p.is_active ? '' : `<button class="btn sm" data-action="profile-activate" data-id="${p.id}">Rendi attivo</button>`}
+        <button class="btn sm danger" data-action="profile-delete" data-id="${p.id}" data-name="${esc(p.nome)}">Elimina</button>
+      </div>`).join('') + '</div>' : '<div class="empty">Ancora nessun profilo.</div>'}
+
+    <div class="section-title">Aggiungi</div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="muted" style="margin-bottom:10px;font-weight:700">Nuovo creator</div>
+        <div class="row"><input id="newCreatorName" placeholder="Nome creator" style="flex:1" />
+          <button class="btn blue" data-action="create-creator">Crea</button></div>
+      </div>
+      <div class="card">
+        <div class="muted" style="margin-bottom:10px;font-weight:700">Nuovo profilo</div>
+        <div class="row wrap">
+          <select id="newProfileCreator" ${r.creators.length ? '' : 'disabled'}>${creatorsOpts || '<option>— crea prima un creator —</option>'}</select>
+          <input id="newProfileName" placeholder="Nome profilo" style="flex:1" />
+          <select id="newProfileTipo">${tipiOpts}</select>
+          <button class="btn blue" data-action="create-profile" ${r.creators.length ? '' : 'disabled'}>Crea</button>
+        </div>
+      </div>
+    </div>`;
+};
+
+/* ============ Vista: Piano ============ */
+async function ensurePlan() {
+  if (!state.profiles.length) {
+    const r = await call('list_profiles');
+    if (r.ok) state.profiles = r.profiles;
+  }
+  const active = state.profiles.find((p) => p.is_active) || state.profiles[0];
+  if (!active) return null;
+  state.activeProfileId = active.id;
+  const lp = await call('list_plans', active.id);
+  if (lp.ok && lp.plans.length) {
+    const g = await call('get_plan', lp.plans[0].id);
+    if (g.ok) { state.currentPlan = g.plan; return active; }
+  }
+  state.currentPlan = null;
+  return active;
+}
+
+VIEWS.piano = async () => {
+  const active = await ensurePlan();
+  if (!active) {
+    return head('Piano', 'Calendario editoriale') +
+      '<div class="empty">Nessun profilo. Crea prima un profilo in <b>Creator</b>.</div>';
+  }
+
+  if (!state.currentPlan) {
+    const [ws, we] = currentWeek();
+    return head('Piano', 'Calendario editoriale · ' + esc(active.nome)) + `
+      <div class="card hero"><div class="hs-title" style="font-size:19px">Nessun piano per questo profilo</div>
+      <div class="muted" style="margin:8px 0 16px">Crea il piano della settimana per iniziare a distribuire i contenuti.</div>
+      <div class="row"><span class="faint">Settimana</span><input id="planWs" type="date" value="${ws}" />
+        <span class="faint">→</span><input id="planWe" type="date" value="${we}" />
+        <button class="btn primary" data-action="plan-create" data-profile="${active.id}">Crea piano</button></div></div>`;
+  }
+
+  const pl = state.currentPlan;
+  const statusBadge = pl.status === 'approvato' ? '<span class="badge green">Approvato</span>' : '<span class="badge amber">Bozza</span>';
+  const days = state.meta.giorni;
+  const cts = state.meta.content_types;
+  const todayIso = isoDate(new Date());
+
+  const cards = days.map((d, idx) => {
+    const dateIso = addDays(pl.week_start, idx);
+    const isToday = dateIso === todayIso;
+    const rows = cts.map((ct) => {
+      const n = pl.grid[ct][d];
+      return `<div class="dc-row">
+        <span class="dc-dot" style="background:${CT_COLORS[ct]}"></span>
+        <span class="dc-label">${CT_LABELS[ct]}</span>
+        <span class="dc-count num">${n}</span>
+        <span class="dc-steppers">
+          <button data-action="cell-dec" data-ct="${ct}" data-day="${d}">−</button>
+          <button data-action="cell-inc" data-ct="${ct}" data-day="${d}">+</button>
+        </span></div>`;
+    }).join('');
+    const dayTotal = pl.totals_by_day[d];
+    return `<div class="daycard ${isToday ? 'today' : ''}">
+      <div class="dc-head"><span class="dc-day">${DAY_LABELS[d]}</span><span class="dc-date num">${dayNum(dateIso)}</span></div>
+      <div class="dc-rows">${rows}</div>
+      <div class="dc-foot"><span>totale</span><span class="num">${dayTotal}</span></div>
+    </div>`;
+  }).join('');
+
+  const actions = `<div class="row">
+    <span class="badge gray">v${pl.version}</span>${statusBadge}
+    <button class="btn danger sm" data-action="plan-reset">Azzera</button>
+    <button class="btn primary" data-action="plan-approve">Approva piano →</button></div>`;
+
+  return head('Piano', 'Calendario editoriale · ' + prettyDate(pl.week_start) + ' → ' + prettyDate(pl.week_end), actions) +
+    chipStrip(cts.map((ct) => ({ label: CT_LABELS[ct], value: pl.totals_by_type[ct], color: CT_COLORS[ct] }))
+      .concat([{ label: 'Totale', value: pl.total, color: '#4c8bf5' }])) +
+    `<div class="week-strip">${cards}</div>`;
+};
+
+/* ============ Vista: Produzione ============ */
+VIEWS.produzione = async () => {
+  const r = await call('production_preview');
+  const meta = state.meta;
+  const capCards = meta.content_types.map((ct) => `<div class="card">
+    <div class="row"><b>${CT_LABELS[ct]}</b><div class="spacer"></div><span class="badge green">Pronto</span></div>
+    <div class="faint" style="margin-top:8px">${meta.pipeline[ct].join(' → ')} → qa → delivery</div></div>`).join('');
+  let hero;
+  if (!r.ok) {
+    hero = `<div class="card hero bad"><div class="hs-title">${esc(r.error)}</div></div>`;
+  } else {
+    const covers = r.covers;
+    hero = `<div class="card hero ${covers ? 'ok' : 'bad'}"><div class="hero-status"><div>
+      <div class="hs-kicker">${covers ? 'Situazione' : 'Attenzione'}</div>
+      <div class="hs-title">${r.ready_count ? (covers ? 'Produzione pronta' : 'Budget insufficiente') : 'Nessun contenuto in coda'}</div>
+      <div class="muted">${r.ready_count} contenuti pronti da piani approvati · stima ${fmt(r.estimated_cost)} crediti su ${fmt(r.balance)} disponibili.</div>
+      <div style="margin-top:16px"><button class="btn primary" data-action="prod-preview">Avvia una prova senza costi</button></div>
+    </div></div></div>`;
+  }
+  return head('Produzione', 'Centro operativo della produzione') + hero + `
+    <div class="section-title">Capacità di produzione</div>
+    <div class="grid cols-3">${capCards}</div>`;
+};
+
+/* ============ Vista: Libreria ============ */
+VIEWS.libreria = async () => {
+  const r = await call('reference_stats');
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  return head('Libreria', 'Magazzino operativo delle reference') +
+    chipStrip([
+      { label: 'Pronte', value: r.ready, color: '#8fe23a' },
+      { label: 'Totali', value: r.total, color: '#4c8bf5' },
+      { label: 'In attesa', value: r.pending, color: '#e8b23d' },
+      { label: 'Errore', value: r.error, color: '#ff6b5e' },
+    ]) + `
+    <div class="section-title">Stato del magazzino</div>
+    <div class="card">${Object.keys(r.by_status || {}).length
+      ? Object.entries(r.by_status).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
+      : '<div class="empty">Nessuna reference ancora importata. Il sync legge dal Google Sheet.</div>'}</div>`;
+};
+
+/* ============ Vista: Costi ============ */
+VIEWS.costi = async () => {
+  await ensurePlan();
+  const planId = state.currentPlan ? state.currentPlan.id : null;
+  const r = await call('budget_status', planId);
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  let hero = '';
+  if (r.plan_cost != null) {
+    const covers = r.covers;
+    hero = `<div class="card hero ${covers ? 'ok' : 'bad'}">
+      <div class="hs-kicker">${covers ? 'Budget sufficiente' : 'Il budget non copre il piano'}</div>
+      <div class="hs-title">${covers ? 'Puoi approvare' : 'Mancano ' + fmt(Math.abs(r.coverage)) + ' crediti'}</div>
+      <div class="grid cols-3" style="margin-top:16px">
+        <div class="tile accent-green"><div class="t-label">Disponibili</div><div class="t-value num">${fmt(r.balance)}</div></div>
+        <div class="tile accent-amber"><div class="t-label">Costo piano</div><div class="t-value num">${fmt(r.plan_cost)}</div></div>
+        <div class="tile accent-${covers ? 'blue' : 'red'}"><div class="t-label">Copertura</div><div class="t-value num">${fmt(r.coverage)}</div></div>
+      </div></div>`;
+  }
+  return head('Costi', 'Budget e crediti (fonte: CreditLedger)') + hero + `
+    <div class="grid cols-3" style="margin-top:16px">
+      <div class="tile accent-${r.balance < 0 ? 'red' : 'green'}"><div class="t-label">Saldo attuale</div><div class="t-value num">${fmt(r.balance)}</div><div class="t-sub">crediti</div></div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Ricarica crediti</div>
+        <div class="row"><input id="topupAmount" type="number" placeholder="es. 100" style="flex:1" />
+          <button class="btn blue" data-action="budget-topup">Ricarica</button></div></div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Allinea a Higgsfield</div>
+        <div class="row"><span class="faint" style="flex:1">Legge il saldo reale e registra la rettifica.</span>
+          <button class="btn" data-action="budget-sync">Sincronizza</button></div></div>
+    </div>`;
+};
+
+/* ============ Vista: Sistema ============ */
+VIEWS.sistema = async () => {
+  const r = await call('overview');
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  const o = r.overview;
+  const block = (title, map) => `<div class="card"><div class="section-title" style="margin:0 0 12px">${title}</div>
+    ${Object.keys(map).length ? Object.entries(map).map(([k, v]) =>
+      `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${esc(k)}</span><span class="num">${v}</span></div>`).join('') : '<div class="faint">nessuno</div>'}</div>`;
+  return head('Sistema', 'Stato complessivo — legge lo stesso DB, nessuna logica duplicata') +
+    chipStrip([
+      { label: 'Saldo', value: fmt(o.saldo_crediti) + ' CR', color: o.saldo_crediti < 0 ? '#ff6b5e' : '#8fe23a' },
+      { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
+    ]) + `
+    <div class="grid cols-3">
+      ${block('Reference per stato', o.reference_per_stato)}
+      ${block('Piani per stato', o.piani_per_stato)}
+      ${block('Content per stato', o.content_per_stato)}</div>`;
+};
+
+/* ============ Vista: Da migliorare (backlog) ============ */
+VIEWS.backlog = async () => {
+  const filter = state.backlogFilter || 'aperto';
+  const r = await call('list_backlog', filter);
+  if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  const notes = r.notes;
+
+  const filterBtns = ['aperto', 'fatto', 'scartato', 'tutti'].map((f) =>
+    `<button class="btn sm ${filter === f ? 'primary' : ''}" data-action="backlog-filter" data-status="${f}">${BACKLOG_STATUS_LABELS[f]}</button>`
+  ).join('');
+
+  const rows = notes.length ? notes.map((n) => `
+    <div class="card" style="margin-bottom:10px">
+      <div class="row">
+        <span class="badge blue">${esc(n.category)}</span>
+        <b style="flex:1">${esc(n.title)}</b>
+        <span class="faint num">${esc(n.created_at.slice(0, 10))}</span>
+      </div>
+      ${n.description ? `<div class="muted" style="margin-top:8px">${esc(n.description)}</div>` : ''}
+      <div class="row" style="margin-top:12px">
+        <span class="badge ${BACKLOG_STATUS_BADGE[n.status] || 'gray'}">${BACKLOG_STATUS_LABELS[n.status] || esc(n.status)}</span>
+        <div class="spacer"></div>
+        ${n.status === 'aperto'
+          ? `<button class="btn sm" data-action="backlog-status" data-id="${n.id}" data-status="fatto">Segna fatto</button>
+             <button class="btn sm danger" data-action="backlog-status" data-id="${n.id}" data-status="scartato">Scarta</button>`
+          : `<button class="btn sm" data-action="backlog-status" data-id="${n.id}" data-status="aperto">Riapri</button>`}
+      </div>
+    </div>`).join('') : '<div class="empty">Nessuna voce con questo filtro.</div>';
+
+  return head('Da migliorare', 'Backlog di limiti noti e idee — cose annotate durante il lavoro da riprendere in futuro') +
+    `<div class="row wrap" style="margin-bottom:16px">${filterBtns}</div>
+    <div class="card" style="margin-bottom:20px">
+      <div class="muted" style="font-weight:700;margin-bottom:10px">Aggiungi voce</div>
+      <div class="row wrap">
+        <input id="newBacklogCategory" placeholder="Categoria (es. qualita)" style="width:160px" />
+        <input id="newBacklogTitle" placeholder="Titolo" style="flex:1;min-width:200px" />
+        <input id="newBacklogDesc" placeholder="Descrizione (opzionale)" style="flex:2;min-width:240px" />
+        <button class="btn blue" data-action="backlog-add">Aggiungi</button>
+      </div>
+    </div>
+    ${rows}`;
+};
+
+/* ============ Azioni ============ */
+async function reloadPlanView() { await setView('piano'); }
+
+const ACTIONS = {
+  'profile-activate': async (el) => {
+    const r = await call('set_active_profile', Number(el.dataset.id));
+    if (r.ok) { toast('Profilo attivo aggiornato'); state.profiles = []; await refreshTopProfileSwitch(); await setView('creator'); } else toast(r.error, 'err');
+  },
+  'profile-delete': async (el) => {
+    const id = Number(el.dataset.id), nome = el.dataset.name;
+    if (!confirm(`Eliminare il profilo "${nome}"? L'azione non è reversibile.`)) return;
+    const r = await call('delete_profile', id);
+    if (r.ok) { toast('Profilo eliminato'); state.profiles = []; state.currentPlan = null; await refreshTopProfileSwitch(); await setView('creator'); }
+    else toast(r.error, 'err');
+  },
+  'create-creator': async () => {
+    const nome = $('#newCreatorName').value.trim();
+    if (!nome) return toast('Inserisci un nome', 'err');
+    const r = await call('create_creator', nome);
+    r.ok ? (toast('Creator creato'), setView('creator')) : toast(r.error, 'err');
+  },
+  'create-profile': async () => {
+    const cid = $('#newProfileCreator').value, nome = $('#newProfileName').value.trim(), tipo = $('#newProfileTipo').value;
+    if (!nome) return toast('Inserisci un nome profilo', 'err');
+    const r = await call('create_profile', cid, nome, tipo);
+    if (r.ok) { toast('Profilo creato'); state.profiles = []; await refreshTopProfileSwitch(); setView('creator'); } else toast(r.error, 'err');
+  },
+  'plan-create': async (el) => {
+    const ws = $('#planWs').value, we = $('#planWe').value;
+    const r = await call('create_plan', Number(el.dataset.profile), ws, we);
+    if (r.ok) { state.currentPlan = r.plan; toast('Piano creato'); reloadPlanView(); } else toast(r.error, 'err');
+  },
+  'cell-inc': (el) => stepCell(el.dataset.ct, el.dataset.day, +1),
+  'cell-dec': (el) => stepCell(el.dataset.ct, el.dataset.day, -1),
+  'plan-reset': async () => {
+    if (!state.currentPlan) return;
+    const pl = state.currentPlan;
+    for (const ct of state.meta.content_types)
+      for (const d of state.meta.giorni)
+        if (pl.grid[ct][d] > 0) await call('plan_set_cell', pl.id, ct, d, 0);
+    toast('Piano azzerato'); state.currentPlan = null; reloadPlanView();
+  },
+  'plan-approve': async () => {
+    if (!state.currentPlan) return;
+    const r = await call('approve_plan', state.currentPlan.id);
+    if (r.ok) { state.currentPlan = r.plan; toast('Piano approvato · stima ' + fmt(r.estimated) + ' CR'); refreshBalance(); reloadPlanView(); }
+    else if (r.kind === 'budget') toast('Budget non copre il piano: mancano ' + fmt(r.needed - r.available) + ' CR', 'err');
+    else toast(r.error, 'err');
+  },
+  'budget-topup': async () => {
+    const v = parseFloat($('#topupAmount').value);
+    if (!v || v <= 0) return toast('Importo non valido', 'err');
+    const r = await call('budget_topup', v);
+    r.ok ? (toast('Ricarica registrata'), refreshBalance(), setView('costi')) : toast(r.error, 'err');
+  },
+  'budget-sync': async () => {
+    toast('Sincronizzo con Higgsfield…');
+    const r = await call('budget_sync');
+    r.ok ? (toast('Saldo allineato: rettifica ' + fmt(r.adjustment) + ' CR'), refreshBalance(), setView('costi')) : toast(r.error, 'err');
+  },
+  'prod-preview': async () => {
+    const r = await call('production_preview');
+    r.ok ? toast(r.ready_count + ' pronti · stima ' + fmt(r.estimated_cost) + ' CR (nessun credito speso)') : toast(r.error, 'err');
+  },
+  'backlog-filter': (el) => { state.backlogFilter = el.dataset.status; setView('backlog'); },
+  'backlog-add': async () => {
+    const category = $('#newBacklogCategory').value.trim() || 'generico';
+    const title = $('#newBacklogTitle').value.trim();
+    const description = $('#newBacklogDesc').value.trim();
+    if (!title) return toast('Inserisci un titolo', 'err');
+    const r = await call('add_backlog_note', category, title, description);
+    r.ok ? (toast('Voce aggiunta al backlog'), setView('backlog')) : toast(r.error, 'err');
+  },
+  'backlog-status': async (el) => {
+    const r = await call('set_backlog_status', Number(el.dataset.id), el.dataset.status);
+    r.ok ? (toast('Stato aggiornato'), setView('backlog')) : toast(r.error, 'err');
+  },
+};
+
+let stepBusy = false;
+async function stepCell(ct, day, delta) {
+  if (stepBusy || !state.currentPlan) return;
+  stepBusy = true;
+  const pl = state.currentPlan;
+  const target = Math.max(0, pl.grid[ct][day] + delta);
+  const r = await call('plan_set_cell', pl.id, ct, day, target);
+  stepBusy = false;
+  if (r.ok) { state.currentPlan = r.plan; reloadPlanView(); } else toast(r.error, 'err');
+}
+
+/* ============ Delegazione eventi ============ */
+document.addEventListener('click', (e) => {
+  const tab = e.target.closest('.tab');
+  if (tab) { setView(tab.dataset.view); return; }
+  const act = e.target.closest('[data-action]');
+  if (act && ACTIONS[act.dataset.action]) { ACTIONS[act.dataset.action](act); }
+});
+document.addEventListener('change', async (e) => {
+  const sw = e.target.closest('[data-change="switch-profile-top"]');
+  if (sw && sw.value) {
+    await call('set_active_profile', Number(sw.value));
+    state.profiles = []; state.currentPlan = null;
+    if (state.view === 'piano' || state.view === 'costi') setView(state.view);
+  }
+});
+
+/* ============ Avvio ============ */
+async function init() {
+  const m = await call('meta');
+  if (m.ok) state.meta = m;
+  await refreshBalance();
+  await refreshTopProfileSwitch();
+  await setView('oggi');
+}
+if (window.pywebview && window.pywebview.api) init();
+else window.addEventListener('pywebviewready', init);

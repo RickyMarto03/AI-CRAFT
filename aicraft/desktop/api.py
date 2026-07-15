@@ -172,6 +172,29 @@ def _reference_folder(item: ReferenceItem) -> Path | None:
     return Path(candidate).resolve().parent
 
 
+_ERROR_STATUSES = ("error", "download_error", "private", "unavailable", "transcription_error")
+
+
+def _reference_weekly_trend(session, *, weeks: int = 8) -> list:
+    """Andamento settimanale della Libreria (totale/pronte/errore/in attesa
+    per settimana dello sheet), per vedere se il ritmo di acquisizione e il
+    tasso di successo cambiano nel tempo — non solo un totale statico."""
+    rows = session.query(ReferenceItem).filter(ReferenceItem.week_start.is_not(None)).all()
+    by_week: dict = {}
+    for r in rows:
+        key = r.week_start.isoformat()
+        bucket = by_week.setdefault(key, {"week_start": key, "total": 0, "ready": 0, "error": 0, "pending": 0})
+        bucket["total"] += 1
+        if r.status == "ready":
+            bucket["ready"] += 1
+        elif r.status in _ERROR_STATUSES:
+            bucket["error"] += 1
+        elif r.status == "pending":
+            bucket["pending"] += 1
+    ordered = sorted(by_week.values(), key=lambda b: b["week_start"], reverse=True)[:weeks]
+    return list(reversed(ordered))  # cronologico, piu' vecchia prima
+
+
 def _reference_stats(session) -> dict:
     rows = session.query(ReferenceItem).all()
     by_status: dict = {}
@@ -192,7 +215,7 @@ def _reference_stats(session) -> dict:
         key=lambda r: r.downloaded_at or r.imported_at,
         reverse=True,
     )[:10]
-    error_total = sum(by_status.get(s, 0) for s in ("error", "download_error", "private", "unavailable", "transcription_error"))
+    error_total = sum(by_status.get(s, 0) for s in _ERROR_STATUSES)
     return {
         "total": len(rows),
         "by_status": by_status,
@@ -272,6 +295,12 @@ class Api:
             d = _profile_dict(p)
             d["creator"] = creators.get(p.creator_id)
             d["is_active"] = active is not None and p.id == active.id
+            pieces = session.query(ContentPiece).filter(ContentPiece.profile_id == p.id).all()
+            d["content_stats"] = {
+                "total": len(pieces),
+                "delivered": sum(1 for x in pieces if x.status == "delivered"),
+                "cost_actual": sum(x.cost_credits_actual or 0.0 for x in pieces),
+            }
             rows.append(d)
         return {"profiles": rows, "creators": [{"id": cid, "nome": nome} for cid, nome in creators.items()]}
 
@@ -350,6 +379,10 @@ class Api:
     @_endpoint
     def list_references(self, session, status=None, category=None, limit=50):
         return {"references": _list_references(session, status=status, category=category, limit=int(limit))}
+
+    @_endpoint
+    def reference_weekly_trend(self, session, weeks=8):
+        return {"weeks": _reference_weekly_trend(session, weeks=int(weeks))}
 
     @_endpoint
     def retry_reference(self, session, reference_id):

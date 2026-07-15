@@ -27,14 +27,12 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Tracking a checkpoint FATTO** (vedi doc §18). **Piano arricchito FATTO** (vedi doc §19):
-duplicazione settimana, storico versione con timestamp, vista mensile.
+**Fatto**: tracking a checkpoint (§18), Piano arricchito (§19), Creator/Libreria arricchiti (§20).
 
 **Prossimo, nell'ordine di priorita' scelto dall'utente** (non ancora iniziato):
-1. **Creator/Libreria**: statistiche per categoria/performance reference nel tempo.
-2. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
+1. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
    proiezione consumo mensile.
-3. **Produzione — retry singolo pezzo** (rimasto indietro, minore priorita'): oggi non c'e' un
+2. **Produzione — retry singolo pezzo** (rimasto indietro, minore priorita'): oggi non c'e' un
    "riprova questo pezzo" per un ContentPiece finito in `error` dalla UI — bisogna rilanciare
    l'intero piano.
 
@@ -73,6 +71,17 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 sera, parte 5 (sessione Claude — Creator/Libreria arricchiti)
+
+- `list_profiles` include `content_stats` per profilo (totale/consegnati/costo speso).
+- `reference_weekly_trend(weeks=8)`: pronte/errore/attesa per settimana. Estratta la costante
+  `_ERROR_STATUSES` (prima duplicata inline in `_reference_stats`) per non disallineare le due
+  viste su quali stati contano come errore.
+- UI: statistiche produzione per profilo in Creator, sezione "Andamento" con barra impilata per
+  settimana in Libreria.
+- 178 test verdi. Vedi doc §20.
+- Prossimo (ordine scelto dall'utente): Costi.
 
 ### 15/07/2026 sera, parte 4 (sessione Claude — Piano arricchito)
 

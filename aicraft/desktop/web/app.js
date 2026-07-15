@@ -192,15 +192,19 @@ VIEWS.creator = async () => {
       { label: 'Creator', value: r.creators.length, color: '#4c8bf5' },
     ]) + `
     <div class="section-title">Profili gestiti</div>
-    ${r.profiles.length ? '<div class="plist">' + r.profiles.map((p) => `
+    ${r.profiles.length ? '<div class="plist">' + r.profiles.map((p) => {
+      const st = p.content_stats || { total: 0, delivered: 0, cost_actual: 0 };
+      return `
       <div class="prow ${p.is_active ? 'active' : ''}">
         <div class="p-avatar">${esc((p.nome[0] || '?').toUpperCase())}</div>
         <div><div class="p-name">${esc(p.nome)} ${p.is_active ? '<span class="badge green">selezionato</span>' : ''}</div>
-          <div class="faint">${TIPO_LABELS[p.tipo_contenuto] || p.tipo_contenuto} · ${esc(p.creator || '')}</div></div>
+          <div class="faint">${TIPO_LABELS[p.tipo_contenuto] || p.tipo_contenuto} · ${esc(p.creator || '')}
+            ${st.total ? ` · ${st.delivered}/${st.total} consegnati · ${fmt(st.cost_actual)} CR spesi` : ' · nessun contenuto ancora'}</div></div>
         <div class="spacer"></div>
         ${p.is_active ? '' : `<button class="btn sm" data-action="profile-activate" data-id="${p.id}">Rendi attivo</button>`}
         <button class="btn sm danger" data-action="profile-delete" data-id="${p.id}" data-name="${esc(p.nome)}">Elimina</button>
-      </div>`).join('') + '</div>' : '<div class="empty">Ancora nessun profilo.</div>'}
+      </div>`;
+    }).join('') + '</div>' : '<div class="empty">Ancora nessun profilo.</div>'}
 
     <div class="section-title">Aggiungi</div>
     <div class="grid cols-2">
@@ -403,11 +407,28 @@ VIEWS.produzione = async () => {
 };
 
 /* ============ Vista: Libreria ============ */
+function weeklyTrendRows(trend) {
+  if (!trend || !trend.ok || !trend.weeks.length) return '<div class="empty">Nessun dato per settimana.</div>';
+  return trend.weeks.map((w) => {
+    const total = Math.max(1, w.total);
+    const pct = (n) => (n / total * 100).toFixed(1) + '%';
+    return `<div style="margin-bottom:10px">
+      <div class="row" style="margin-bottom:4px"><span class="faint">${esc(w.week_start)}</span><div class="spacer"></div><span class="num faint">${w.total} totali</span></div>
+      <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--bg-card-2)">
+        <div style="width:${pct(w.ready)};background:var(--green)" title="${w.ready} pronte"></div>
+        <div style="width:${pct(w.error)};background:var(--red)" title="${w.error} errore"></div>
+        <div style="width:${pct(w.pending)};background:var(--amber)" title="${w.pending} in attesa"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 VIEWS.libreria = async () => {
   const filter = state.libFilter || { status: '', category: '' };
-  const [r, listed] = await Promise.all([
+  const [r, listed, trend] = await Promise.all([
     call('reference_stats'),
     call('list_references', filter.status || null, filter.category || null, 50),
+    call('reference_weekly_trend', 8),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const statusRows = Object.keys(r.by_status || {}).length
@@ -464,6 +485,8 @@ VIEWS.libreria = async () => {
       <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per settimana</div>${weekRows}</div>
       <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per categoria</div>${categoryRows}</div>
     </div>
+    <div class="section-title">Andamento (ultime settimane)</div>
+    <div class="card">${weeklyTrendRows(trend)}</div>
     <div class="section-title">Ultimi scaricati</div>
     <div class="plist">${latestRows}</div>
     <div class="section-title">Reference (filtrabili, retry/apertura cartella)</div>

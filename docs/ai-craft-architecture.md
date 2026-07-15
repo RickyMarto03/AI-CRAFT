@@ -718,3 +718,20 @@ Primo dei 4 blocchi di arricchimento richiesti dall'utente dopo il tracking a ch
 **Test**: `test_planning.py` (`duplicate_plan_week` copia la griglia correttamente, gestisce un
 piano vuoto senza esplodere), `test_desktop_api.py` (`duplicate_plan` endpoint, piano inesistente,
 `monthly_summary` aggrega solo le settimane del mese giusto). 176 test verdi.
+
+## 20. Arricchimento Creator/Libreria: statistiche e andamento nel tempo — FATTO (15/07/2026, sessione Claude)
+
+Secondo dei 4 blocchi di arricchimento richiesti dall'utente.
+
+- **Creator**: `list_profiles` ora include `content_stats` per profilo (`total`, `delivered`,
+  `cost_actual`) — quanto ha prodotto e speso ciascun profilo, non solo l'elenco anagrafico. UI:
+  mostrato nella riga di ogni profilo.
+- **Libreria**: nuovo endpoint `reference_weekly_trend(weeks=8)` — per ciascuna delle ultime N
+  settimane (per `ReferenceItem.week_start`, non data di download), conta pronte/errore/in attesa.
+  Costante `_ERROR_STATUSES` estratta (era duplicata inline in `_reference_stats`) e riusata qui,
+  cosi' le due viste non rischiano di disallinearsi su quali stati contano come "errore" (stesso
+  principio del fix su `RETRYABLE_STATUSES` in §16). UI: sezione "Andamento (ultime settimane)"
+  con una barra impilata pronte/errore/attesa per settimana.
+
+**Test**: `test_desktop_api.py` (`content_stats` su `list_profiles`, `reference_weekly_trend`
+aggrega e ordina cronologicamente). 178 test verdi.

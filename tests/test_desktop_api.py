@@ -587,3 +587,46 @@ def test_monthly_summary_aggrega_le_settimane_del_mese(api):
     assert len(r["weeks"]) == 2
     assert r["total_pieces"] == 3
     assert r["totals_by_type"] == {"carosello": 2, "video_talking": 1}
+
+
+def test_list_profiles_include_statistiche_produzione(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        session.add_all([
+            ContentPiece(profile=profile, content_type="carosello", status="delivered", cost_credits_actual=0.36),
+            ContentPiece(profile=profile, content_type="video_talking", status="delivered", cost_credits_actual=36.0),
+            ContentPiece(profile=profile, content_type="video_balletti", status="error"),
+        ])
+        session.commit()
+
+    r = api.list_profiles()
+
+    assert r["ok"]
+    stats = r["profiles"][0]["content_stats"]
+    assert stats["total"] == 3
+    assert stats["delivered"] == 2
+    assert stats["cost_actual"] == pytest.approx(36.36)
+
+
+def test_reference_weekly_trend_aggrega_per_settimana(api):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="ready", category="TALKING"),
+            _seed_reference(status="error", category="BOOBS"),
+        ])
+        # forza settimane diverse esplicitamente
+        refs = session.query(ReferenceItem).all()
+        refs[0].week_start = dt.date(2026, 7, 6)
+        refs[1].week_start = dt.date(2026, 7, 13)
+        session.commit()
+
+    r = api.reference_weekly_trend(weeks=8)
+
+    assert r["ok"]
+    weeks = {w["week_start"]: w for w in r["weeks"]}
+    assert weeks["2026-07-06"]["ready"] == 1
+    assert weeks["2026-07-13"]["error"] == 1
+    # ordine cronologico, non decrescente
+    assert [w["week_start"] for w in r["weeks"]] == sorted(weeks.keys())

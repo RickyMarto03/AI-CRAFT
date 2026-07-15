@@ -1,5 +1,9 @@
 # AI-craft — Blueprint di Architettura
 
+> **Prima di iniziare a lavorare, leggi `docs/PROSSIMI_PASSI.md`**: dice su cosa lavorare
+> adesso e cosa e' stato deciso in chat ma non ancora implementato. Questo file (l'architettura)
+> spiega il COME/PERCHE' tecnico una volta che sai SU COSA lavorare.
+
 ## 0. Scope
 
 Sistema di produzione contenuti IG (video, caroselli, stories) per un Creator con più Profili, espandibile a più Creator in futuro. Pipeline: reference (da Google Sheet) → download → trascrizione → rigenerazione (Higgsfield) → QA → consegna. Con calendario editoriale, budget/crediti, e gestione multi-profilo fin dall'inizio.

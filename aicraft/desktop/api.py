@@ -16,6 +16,8 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import logging
+import subprocess
+from pathlib import Path
 
 from .. import backlog, config, reporting
 from ..budget import estimate as budget_estimate
@@ -84,6 +86,87 @@ def _plan_grid(session, plan: PlanWeek) -> dict:
         "assigned_references": assigned,
         "missing_references": max(0, len(pieces) - assigned),
     }
+
+
+def _today_agenda(session) -> dict:
+    """Cosa e' pianificato per OGGI (giorno della settimana corrente) per il
+    profilo attivo. `scheduled_day` su ContentPiece e' un giorno della
+    settimana ("lun".."dom"), non una data assoluta: per sapere cosa
+    corrisponde a "oggi" serve trovare il PlanWeek la cui settimana
+    (week_start..week_end) contiene la data odierna, poi filtrare i pezzi
+    per il giorno corrispondente. GIORNI_VALIDI e' ordinato lun..dom, stesso
+    ordine di `date.weekday()` (0=lun), quindi l'indice combacia
+    direttamente senza bisogno di una mappa a parte."""
+    today = dt.date.today()
+    giorno = GIORNI_VALIDI[today.weekday()]
+    active = profiles.get_active_profile(session)
+    if active is None:
+        return {"has_profile": False, "giorno": giorno, "plan": None, "pieces": []}
+
+    plan = (
+        session.query(PlanWeek)
+        .filter(PlanWeek.profile_id == active.id, PlanWeek.week_start <= today, PlanWeek.week_end >= today)
+        .first()
+    )
+    if plan is None:
+        return {"has_profile": True, "profile_nome": active.nome, "giorno": giorno, "plan": None, "pieces": []}
+
+    pieces = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.plan_week_id == plan.id, ContentPiece.scheduled_day == giorno)
+        .order_by(ContentPiece.content_type)
+        .all()
+    )
+    return {
+        "has_profile": True,
+        "profile_nome": active.nome,
+        "giorno": giorno,
+        "plan": {"id": plan.id, "status": plan.status},
+        "pieces": [
+            {
+                "id": p.id,
+                "content_type": p.content_type,
+                "status": p.status,
+                "has_reference": p.reference_id is not None,
+            }
+            for p in pieces
+        ],
+    }
+
+
+def _list_references(session, *, status=None, category=None, limit=50) -> list:
+    """Lista filtrabile di reference per la Libreria (a differenza di
+    `_reference_stats`, che ritorna solo aggregati + le 10 piu' recenti).
+    Stesso criterio di ordinamento di `_reference_stats` (piu' recenti
+    prima, per coerenza)."""
+    q = session.query(ReferenceItem)
+    if status:
+        q = q.filter(ReferenceItem.status == status)
+    if category:
+        q = q.filter(ReferenceItem.source_category == category)
+    rows = sorted(q.all(), key=lambda r: r.downloaded_at or r.imported_at, reverse=True)[:limit]
+    return [
+        {
+            "id": r.id,
+            "url": r.source_url,
+            "status": r.status,
+            "source_tab": r.source_tab,
+            "source_category": r.source_category,
+            "week_start": r.week_start.isoformat() if r.week_start else None,
+            "downloaded_at": r.downloaded_at.isoformat() if r.downloaded_at else None,
+            "has_caption": bool(r.original_caption),
+            "has_local_media": bool(r.local_video_path or r.frame_paths),
+            "error_message": r.error_message,
+        }
+        for r in rows
+    ]
+
+
+def _reference_folder(item: ReferenceItem) -> Path | None:
+    candidate = item.local_video_path or (item.frame_paths[0] if item.frame_paths else None)
+    if not candidate:
+        return None
+    return Path(candidate).resolve().parent
 
 
 def _reference_stats(session) -> dict:
@@ -171,6 +254,10 @@ class Api:
     def overview(self, session):
         return {"overview": reporting.overview(session)}
 
+    @_endpoint
+    def today_agenda(self, session):
+        return _today_agenda(session)
+
     # --- profili (Creator) ---
 
     @_endpoint
@@ -256,6 +343,29 @@ class Api:
         stats = _reference_stats(session)
         stats["sync"] = result
         return stats
+
+    @_endpoint
+    def list_references(self, session, status=None, category=None, limit=50):
+        return {"references": _list_references(session, status=status, category=category, limit=int(limit))}
+
+    @_endpoint
+    def retry_reference(self, session, reference_id):
+        result = reference_sync.retry_reference(int(reference_id))
+        return {"retry": result}
+
+    @_endpoint
+    def open_reference_folder(self, session, reference_id):
+        item = session.get(ReferenceItem, int(reference_id))
+        if item is None:
+            return {"ok": False, "error": f"Reference {reference_id} inesistente"}
+        folder = _reference_folder(item)
+        if folder is None or not folder.is_dir():
+            return {"ok": False, "error": "Nessuna cartella locale per questa reference"}
+        media_root = config.MEDIA_DIR.resolve()
+        if folder != media_root and media_root not in folder.parents:
+            return {"ok": False, "error": "Percorso fuori dalla cartella media, rifiutato per sicurezza"}
+        subprocess.run(["open", str(folder)], check=False)
+        return {"folder": str(folder)}
 
     # --- piano (Piano) ---
 

@@ -81,13 +81,14 @@ def run_headless(prompt: str, *, allowed_tools: Optional[list] = None, system_pr
 
 def write_talking_video_prompt(
     *,
-    frame_paths: list,
+    frames: list,
     transcript: str,
     character,
     content_type: str,
     source_category: str,
     duration_seconds: float,
     use_video_reference: bool,
+    transcript_segments: Optional[list] = None,
 ) -> str:
     """Prompt cinematografico completo per seedance_2_0 (video_talking/
     video_caption). Sostituisce il vecchio `write_regen_prompt` (troppo
@@ -103,16 +104,42 @@ def write_talking_video_prompt(
     i frame campionati lungo l'INTERO video (frame_picker.sample_frames,
     non solo l'inquadratura iniziale) per dedurre movimenti/camera/pacing.
 
+    `frames`: lista di oggetti con `.path` e `.timestamp_sec` (vedi
+    frame_picker.SampledFrame). `transcript_segments`: lista opzionale di
+    {"start", "end", "text"} (vedi transcriber.transcribe) — quando presente,
+    permette a Claude di correlare dialogo e frame PER SECONDO ESATTO invece
+    di indovinare l'allineamento guardando solo la sequenza di immagini
+    (limite di precisione segnalato dall'utente il 15/07/2026, vedi §12.16).
+    Se assente (reference scaricate prima di questa modifica), il prompt
+    degrada al comportamento precedente basato solo sull'ordine dei frame.
+
     Output: testo libero strutturato (non JSON, a differenza di
     write_carousel_prompts) — lo stesso formato dei prompt reali forniti
     dall'utente come esempio.
     """
-    if not frame_paths:
+    if not frames:
         raise ValueError("servono i frame del video per l'analisi")
     if not transcript.strip():
         raise ValueError("serve la trascrizione per scrivere il dialogo")
 
-    paths_list = "\n".join(f"- {p}" for p in frame_paths)
+    paths_list = "\n".join(f"- [{f.timestamp_sec:.1f}s] {f.path}" for f in frames)
+
+    if transcript_segments:
+        segments_list = "\n".join(
+            f"- [{s['start']:.1f}s–{s['end']:.1f}s] ‘{s['text'].strip()}’" for s in transcript_segments
+        )
+        transcript_block = (
+            f"Segmenti della trascrizione CON TIMESTAMP ESATTI (usa questi secondi per capire quale frame "
+            f"corrisponde a quale frase — non indovinare l'allineamento, i numeri sopra i frame e qui sotto sono "
+            f"nella stessa scala temporale del video originale):\n{segments_list}\n\n"
+            f"Trascrizione completa in un unico blocco, come riferimento:\n\"\"\"\n{transcript.strip()}\n\"\"\""
+        )
+    else:
+        transcript_block = (
+            f"Questa e' la trascrizione ESATTA di cio' che dice la persona nel video (senza timestamp per "
+            f"segmento disponibili: deduci l'allineamento con i frame dall'ordine e dal contenuto):\n\"\"\"\n"
+            f"{transcript.strip()}\n\"\"\""
+        )
 
     if use_video_reference:
         reference_clause = (
@@ -131,11 +158,11 @@ def write_talking_video_prompt(
         )
 
     prompt = (
-        f"Guarda con attenzione questi {len(frame_paths)} frame campionati lungo l'intero video originale, in "
-        f"ordine temporale (usa lo strumento di lettura file, sono immagini):\n{paths_list}\n\n"
+        f"Guarda con attenzione questi {len(frames)} frame campionati lungo l'intero video originale, ciascuno "
+        f"etichettato col secondo esatto in cui compare nel video (usa lo strumento di lettura file, sono "
+        f"immagini):\n{paths_list}\n\n"
         f"E' un video Instagram di tipo '{content_type}' (categoria '{source_category}'), durata originale "
-        f"{duration_seconds:.1f} secondi. Questa e' la trascrizione ESATTA di cio' che dice la persona nel "
-        f"video:\n\n\"\"\"\n{transcript.strip()}\n\"\"\"\n\n"
+        f"{duration_seconds:.1f} secondi. {transcript_block}\n\n"
         "Scrivi UN prompt cinematografico completo in inglese per rigenerare questo video con un nuovo modello, "
         "seguendo questa struttura (stesso formato di prompt reali gia' usati con successo su questa "
         "piattaforma):\n\n"
@@ -144,7 +171,9 @@ def write_talking_video_prompt(
         "ambiente/luce).\n\n"
         "ACTION/PERFORMANCE: descrivi i movimenti di corpo/mani/testa/sguardo ed espressioni facciali osservati "
         "nei frame, collegandoli ALLE FRASI ESATTE del dialogo (cita la frase tra virgolette singole, poi descrivi "
-        "il movimento che l'accompagna) — segui l'ordine del dialogo dall'inizio alla fine.\n\n"
+        "il movimento che l'accompagna) — usa i timestamp di frame e segmenti per abbinare con precisione quale "
+        "frase viene detta in quale momento/frame, invece di indovinare dall'ordine. Segui l'ordine del dialogo "
+        "dall'inizio alla fine.\n\n"
         "CAMERA: posizione/movimento della camera osservato nei frame (es. camera fissa smartphone, leggero "
         "movimento a mano, nessun taglio se i frame mostrano continuita').\n\n"
         f"PACING: ritmo per stare in {duration_seconds:.1f} secondi totali, dichiara esplicitamente la durata nel "

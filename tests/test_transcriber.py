@@ -51,6 +51,7 @@ def test_has_audio_stream_riconosce_video_con_audio(tmp_path):
 def test_transcribe_video_muto_torna_vuoto_senza_errore(tmp_path):
     muto = tmp_path / "muto.mp4"
     _video_muto(muto)
-    transcript, audio_path = transcriber.transcribe_video(muto)
+    transcript, segments, audio_path = transcriber.transcribe_video(muto)
     assert transcript == ""
+    assert segments == []
     assert audio_path is None

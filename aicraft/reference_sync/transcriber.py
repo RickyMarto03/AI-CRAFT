@@ -53,19 +53,32 @@ def extract_audio(video_path: Path) -> Path:
     return audio_path
 
 
-def transcribe(audio_path: Path) -> str:
+def transcribe(audio_path: Path) -> tuple:
+    """Ritorna (transcript_piatto, segmenti). Ogni segmento e' un dict
+    {"start": float, "end": float, "text": str} — faster-whisper li produce
+    gia' nativamente, prima venivano scartati unendo solo il testo. Servono
+    per correlare con precisione dialogo e frame video (vedi
+    claude_creative.write_talking_video_prompt e docs §12.15/§12.16): senza
+    timestamp, sapere quale frase corrisponde a quale momento del video e'
+    solo un'approssimazione a occhio."""
     model = _get_model()
-    segments, _info = model.transcribe(str(audio_path), language=None)
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    raw_segments, _info = model.transcribe(str(audio_path), language=None)
+    segments = [
+        {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
+        for s in raw_segments
+    ]
+    transcript = " ".join(s["text"] for s in segments).strip()
+    return transcript, segments
 
 
 def transcribe_video(video_path: Path) -> tuple:
-    """Trascrive un video end-to-end. Ritorna (transcript, audio_path).
+    """Trascrive un video end-to-end. Ritorna (transcript, segments, audio_path).
 
-    Se il video non ha traccia audio, ritorna ("", None) senza errore: un
-    video muto e' un caso legittimo, non un fallimento.
+    Se il video non ha traccia audio, ritorna ("", [], None) senza errore:
+    un video muto e' un caso legittimo, non un fallimento.
     """
     if not has_audio_stream(video_path):
-        return "", None
+        return "", [], None
     audio_path = extract_audio(video_path)
-    return transcribe(audio_path), audio_path
+    transcript, segments = transcribe(audio_path)
+    return transcript, segments, audio_path

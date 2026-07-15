@@ -50,6 +50,13 @@ class ReferenceItem(Base):
 
     transcript: Mapped[Optional[str]]
     transcript_status: Mapped[Optional[str]]
+    # Segmenti Whisper con timestamp: [{"start": float, "end": float, "text": str}, ...].
+    # Non nel blueprint originale: aggiunta il 15/07/2026 per permettere a
+    # write_talking_video_prompt di correlare dialogo e frame video per
+    # secondo esatto invece di indovinare l'allineamento — vedi
+    # docs/ai-craft-architecture.md §12.16. Puo' essere vuota per reference
+    # scaricate prima di questa modifica (transcript resta comunque valido).
+    transcript_segments: Mapped[Optional[list]] = mapped_column(JSON, default=list)
 
     content_type_hint: Mapped[Optional[str]]  # "video" | "carosello"
 

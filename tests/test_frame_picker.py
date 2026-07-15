@@ -123,30 +123,35 @@ def test_sample_frames_estrae_il_numero_richiesto(tmp_path):
     video = tmp_path / "v.mp4"
     _make_video(video, duration=3, fps=10)  # 30 frame
 
-    paths = frame_picker.sample_frames(video, tmp_path / "frames", count=5)
+    frames = frame_picker.sample_frames(video, tmp_path / "frames", count=5)
 
-    assert len(paths) == 5
-    assert all(p.exists() for p in paths)
+    assert len(frames) == 5
+    assert all(f.path.exists() for f in frames)
 
 
-def test_sample_frames_coprono_lintero_video_non_solo_linizio(tmp_path):
+def test_sample_frames_timestamp_crescenti_e_coprono_lintero_video(tmp_path):
     video = tmp_path / "v.mp4"
     _make_video(video, duration=3, fps=10)
 
-    paths = frame_picker.sample_frames(video, tmp_path / "frames", count=3)
+    frames = frame_picker.sample_frames(video, tmp_path / "frames", count=3)
 
     # nomi in ordine temporale (analysis_frame_00, 01, 02...), non un
     # singolo frame ripetuto: verifica che siano file distinti
-    assert len(set(p.name for p in paths)) == len(paths)
+    assert len(set(f.path.name for f in frames)) == len(frames)
+    # timestamp crescenti e distribuiti sull'intero video, non ammassati all'inizio
+    timestamps = [f.timestamp_sec for f in frames]
+    assert timestamps == sorted(timestamps)
+    assert timestamps[0] == pytest.approx(0.0, abs=0.05)
+    assert timestamps[-1] > 2.0  # vicino alla fine dei 3s, non solo l'inizio
 
 
 def test_sample_frames_count_maggiore_dei_frame_disponibili_non_esplode(tmp_path):
     video = tmp_path / "v.mp4"
     _make_video(video, duration=1, fps=5)  # ~5 frame
 
-    paths = frame_picker.sample_frames(video, tmp_path / "frames", count=100)
+    frames = frame_picker.sample_frames(video, tmp_path / "frames", count=100)
 
-    assert 1 <= len(paths) <= 5
+    assert 1 <= len(frames) <= 5
 
 
 def test_sample_frames_video_inesistente_solleva_errore(tmp_path):

@@ -352,7 +352,7 @@ L'utente ha generato per davvero delle foto con i prompt prodotti dal sistema e 
 ### 12.13 Cosa manca ancora
 
 - **Caption originale nello stadio caption/hashtag: FATTA.** La cattura durante il download e' salvata in `ReferenceItem.original_caption`; `_stage_caption_hashtag` ora la fa adattare da Claude quando presente e usa il prompt generativo solo come fallback.
-- **Analisi video per i talking** (dialogo + movimenti + background + outfit + tempo) — FATTA, vedi §12.15. Resta aperto solo: timestamp per segmento nella trascrizione Whisper (oggi solo testo piatto, la sincronizzazione dialogo/movimento è dedotta da Claude guardando i frame senza sapere il secondo esatto di ogni frase) e la verifica con una generazione `seedance_2_0` reale (mai fatta finora, solo testo del prompt validato).
+- **Analisi video per i talking** (dialogo + movimenti + background + outfit + tempo) — FATTA, vedi §12.15. Densità frame dinamica e timestamp per segmento nella trascrizione Whisper — FATTI, vedi §15.1. Resta aperta solo la verifica con una generazione `seedance_2_0` reale (mai fatta finora, solo testo del prompt validato).
 - **Verificare `image_reference` come URL remoto per motion control** e il costo reale di `kling3_0_motion_control` (`manual_cost_estimate=16.0` è il dato dell'utente, non un job nostro completato con successo) — entrambi richiedono un job completato con successo, non solo bloccato da moderazione.
 - **Verificare `video_references` reale su `seedance_2_0`** (toggle `settings.SEEDANCE_USE_VIDEO_REFERENCE`, default OFF) — mai testato con un job pagato, vedi §12.15.
 - Investigare se una foto di riferimento meno esplicita riduce i blocchi NSFW sui balletti.
@@ -514,3 +514,77 @@ rifiniture operative sotto: 145 test verdi.
   `unavailable`, `private`, `transcription_error` quando possibile. Questi stati restano
   ritentabili dal sync policy e la UI li aggrega nel conteggio "Errore".
 - Suite completa dopo l'aggiornamento: 145 test verdi.
+
+## 15. Review del lavoro Codex + rifiniture richieste dall'utente — FATTO (15/07/2026, sessione Claude)
+
+Dopo la sessione Codex sopra, l'utente ha chiesto una review completa prima di continuare. Letto
+tutto il diff (`git diff aca2eda c9aa930`), verificato a mano (non solo il changelog di Codex) i
+punti a piu' rischio: allocator (idempotente, nessun doppio assegnamento anche chiamato due volte),
+migrazione DB additiva (corretta), scheduler (usa `plistlib`, nessuna stringa shell a mano), scope
+Google Sheet passato da read-only a read-write (confermato intenzionale dall'utente). Trovato un
+bug reale, corretto qui; poi implementate le tre cose che l'utente aveva esplicitamente segnalato
+come mancanti.
+
+**Bug corretto: retry incompleto su `references sync`.** `run_once()` filtrava i pending con
+`("pending", "error", "downloading", "transcribing")`, senza gli stati granulari introdotti da
+`_status_for_processing_error` (`download_error`, `unavailable`, `private`,
+`transcription_error`). Un item fallito con questi stati restava bloccato per sempre con
+`references sync`, mentre `run_policy_once()` (che aveva la lista giusta) lo ritentava
+correttamente. Fix: estratta `RETRYABLE_STATUSES` come costante unica di modulo, usata da
+entrambe le funzioni — non possono piu' disallinearsi. Test di regressione:
+`test_retryable_statuses_copre_tutti_gli_stati_di_errore_granulari`.
+
+### 15.1 Densita' frame + timestamp Whisper per l'analisi video talking
+
+Punto sollevato dall'utente subito dopo l'implementazione di §12.15: 5 frame fissi su un video
+fino a 15s coprono solo ~1 frame ogni 3 secondi, troppo rado per movimenti/espressioni che
+cambiano in fretta. Due fix, entrambi quelli gia' individuati in §12.13/§12.15:
+
+1. **Densita' dinamica**: `engine.ANALYSIS_FRAME_COUNT` (fisso a 5) sostituito da
+   `_analysis_frame_count(duration_seconds)` — circa 1 frame al secondo
+   (`ANALYSIS_FRAMES_PER_SECOND`), minimo 5 (`ANALYSIS_MIN_FRAME_COUNT`) per i clip cortissimi.
+   Nessun costo in crediti Higgsfield: solo piu' chiamate Read di Claude, incluse
+   nell'abbonamento.
+2. **Timestamp Whisper**: `transcriber.transcribe()`/`transcribe_video()` non scartano piu' i
+   segmenti (`start`/`end`/`text`) di faster-whisper — prima venivano uniti in un'unica stringa
+   piatta. Nuova colonna `ReferenceItem.transcript_segments` (JSON, migrazione additiva in
+   `db/base.py`). `frame_picker.sample_frames()` ritorna ora `SampledFrame(path, timestamp_sec)`
+   invece di soli path, cosi' ogni frame porta il proprio secondo esatto.
+
+`claude_creative.write_talking_video_prompt` accetta `frames` (con timestamp) e
+`transcript_segments` opzionale: quando i segmenti sono disponibili, il prompt elenca dialogo E
+frame con lo stesso riferimento temporale e istruisce Claude a correlarli per secondo invece di
+indovinare dall'ordine — degrada automaticamente al comportamento precedente (solo ordine, nessun
+timestamp nel testo) per le reference scaricate prima di questa modifica, che non hanno
+`transcript_segments` valorizzato.
+
+### 15.2 Vista "Oggi" con agenda del giorno
+
+`ContentPiece.scheduled_day` e' un giorno della settimana ("lun".."dom"), non una data assoluta:
+nuovo endpoint `today_agenda` (`aicraft/desktop/api.py`) trova il `PlanWeek` del profilo attivo la
+cui settimana contiene la data odierna, poi filtra i pezzi per il giorno corrispondente
+(`GIORNI_VALIDI` e' ordinato lun..dom, stesso ordine di `date.weekday()`, quindi l'indice combacia
+senza bisogno di una mappa a parte). La vista Oggi mostra ora una sezione "Agenda di oggi" con i
+contenuti pianificati (tipo, stato, se la reference e' assegnata) e avvisi contestuali (piano
+ancora in bozza, pezzi senza reference).
+
+### 15.3 Libreria: filtri, retry singolo, apertura cartella
+
+- **Filtri**: nuovo endpoint `list_references(status, category, limit)`, separato dagli aggregati
+  di `reference_stats` (che restano invariati). UI: due `<select>` (stato/categoria) sopra una
+  lista filtrabile, in aggiunta a "Ultimi scaricati" che resta come vista rapida non filtrata.
+- **Retry singolo**: `reference_sync.retry_reference(reference_id)` apre una propria sessione,
+  richiama `process_item` sul solo item richiesto usando URL/categoria gia' salvati — NON tocca lo
+  Sheet (nessun `sheet_ref`/`sheet_client`, quindi il mark e' automaticamente saltato). Endpoint
+  `retry_reference`, bottone "Riprova" visibile solo sugli stati in `RETRYABLE_STATUSES`.
+- **Apertura cartella locale**: endpoint `open_reference_folder(reference_id)` risolve la cartella
+  da `local_video_path`/`frame_paths`, verifica che sia dentro `config.MEDIA_DIR` (rifiuta
+  qualunque percorso fuori, per sicurezza) ed esegue `open <cartella>` (macOS) via
+  `subprocess.run` con argomenti in lista, mai una stringa shell. Bottone "Apri cartella" visibile
+  solo se la reference ha media locale.
+
+**Test**: aggiunti/estesi `test_reference_sync.py` (retryable_statuses, retry_reference),
+`test_frame_picker.py` (timestamp), `test_claude_creative.py` (timestamp nel prompt),
+`test_desktop_api.py` (today_agenda, list_references, retry_reference, open_reference_folder — con
+`subprocess.run` mockato nei test per non aprire davvero Finder). 158 test verdi in tutto il
+progetto.

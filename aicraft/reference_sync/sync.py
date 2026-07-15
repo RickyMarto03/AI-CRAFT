@@ -23,6 +23,27 @@ from .sheets_reader import SheetClient, SheetReference, fetch_references
 
 logger = logging.getLogger(__name__)
 
+# Stati di un ReferenceItem che vale la pena ritentare in un run di sync
+# (non ancora scaricato, fallito con un errore recuperabile, o rimasto a
+# meta' per un crash/interruzione precedente). Unica fonte di verita' usata
+# sia da run_once che da run_policy_once: prima del fix del 15/07/2026
+# run_once() aveva una tupla piu' corta che non includeva gli stati
+# granulari introdotti da _status_for_processing_error
+# (download_error/unavailable/private/transcription_error), quindi un item
+# fallito con quegli stati restava bloccato per sempre con `references
+# sync` mentre veniva ritentato solo con `sync-policy` — bug reale trovato
+# in review, corretto unificando le due liste qui.
+RETRYABLE_STATUSES = (
+    "pending",
+    "error",
+    "download_error",
+    "private",
+    "unavailable",
+    "transcription_error",
+    "downloading",
+    "transcribing",
+)
+
 
 @dataclass(frozen=True)
 class SyncPolicyItem:
@@ -159,9 +180,10 @@ def process_item(
             item.transcript_status = "running"
             session.commit()
 
-            transcript, audio_path = transcriber.transcribe_video(result.video_path)
+            transcript, segments, audio_path = transcriber.transcribe_video(result.video_path)
             item.local_audio_path = str(audio_path) if audio_path else None
             item.transcript = transcript
+            item.transcript_segments = segments
             # "empty" = video muto/senza parlato (caso legittimo), distinto da "done"
             item.transcript_status = "done" if transcript else "empty"
 
@@ -258,6 +280,23 @@ def _remove_empty_parents(start: Path) -> None:
         current = current.parent
 
 
+def retry_reference(reference_id: int) -> dict:
+    """Riprova il download/trascrizione di UNA reference specifica (azione
+    manuale dalla Libreria), usando l'URL/categoria gia' salvati sul
+    ReferenceItem — non serve un nuovo giro di lettura sheet, quindi NON
+    marca lo Sheet (`process_item` senza sheet_ref/sheet_client si limita a
+    non provarci, vedi il guard su GOOGLE_SHEET_MARK_DOWNLOADS). Utile per
+    sbloccare un item fallito (download_error/private/unavailable/
+    transcription_error) senza aspettare il prossimo sync completo."""
+    init_db()
+    with SessionLocal() as session:
+        item = session.get(ReferenceItem, reference_id)
+        if item is None:
+            raise ValueError(f"ReferenceItem {reference_id} inesistente")
+        process_item(session, item)
+        return {"id": item.id, "status": item.status, "error_message": item.error_message}
+
+
 def run_once(
     year: int | None = None,
     *,
@@ -293,8 +332,7 @@ def run_once(
             logger.info("Eliminate %d reference IG oltre retention (%d giorni)", cleanup_count, config.REFERENCE_RETENTION_DAYS)
             session.commit()
 
-        retryable_statuses = ("pending", "error", "downloading", "transcribing")
-        pending_pairs = [(item, ref) for item, ref in pairs if item.status in retryable_statuses]
+        pending_pairs = [(item, ref) for item, ref in pairs if item.status in RETRYABLE_STATUSES]
         total_pending = len(pending_pairs)
         if max_items and max_items > 0:
             pending_pairs = pending_pairs[:max_items]
@@ -337,16 +375,6 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None) -> di
             logger.info("Eliminate %d reference IG oltre retention (%d giorni)", cleanup_count, config.REFERENCE_RETENTION_DAYS)
             session.commit()
 
-        retryable_statuses = (
-            "pending",
-            "error",
-            "download_error",
-            "private",
-            "unavailable",
-            "transcription_error",
-            "downloading",
-            "transcribing",
-        )
         processed = 0
         by_policy = []
         for item_policy in policy_items:
@@ -354,7 +382,7 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None) -> di
                 (item, ref) for item, ref in pairs
                 if ref.source_tab.upper() == item_policy.source_tab
                 and ref.source_category.upper() == item_policy.source_category
-                and item.status in retryable_statuses
+                and item.status in RETRYABLE_STATUSES
             ][:item_policy.limit]
             for item, ref in candidates:
                 process_item(session, item, sheet_ref=ref, sheet_client=client)

@@ -39,6 +39,7 @@ def _run_additive_migrations() -> None:
                 "done_ricky_col": "INTEGER",
                 "original_caption": "TEXT",
                 "downloaded_at": "DATETIME",
+                "transcript_segments": "TEXT",
             },
         )
     if "content_pieces" in inspector.get_table_names():

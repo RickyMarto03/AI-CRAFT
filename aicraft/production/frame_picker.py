@@ -164,14 +164,23 @@ def _save(frame, timestamp: float, output_path: Path, method: str) -> FramePick:
     return FramePick(frame_path=output_path, timestamp_sec=timestamp, method=method)
 
 
+@dataclass
+class SampledFrame:
+    path: Path
+    timestamp_sec: float
+
+
 def sample_frames(video_path: Path, output_dir: Path, *, count: int = 5) -> list:
     """Estrae `count` frame equispaziati lungo l'INTERO video (a differenza
     di `pick_reference_frame`, che guarda solo la finestra iniziale per
     trovare la foto-base del personaggio). Serve per l'analisi visiva di
     movimenti/outfit/background nel tempo dei video talking/caption (vedi
     claude_creative.write_talking_video_prompt e
-    docs/ai-craft-architecture.md §12.15). Ritorna i path in ordine
-    temporale, come JPEG in output_dir."""
+    docs/ai-craft-architecture.md §12.16). Ritorna `SampledFrame` (path +
+    timestamp reale in secondi) in ordine temporale, JPEG in output_dir: il
+    timestamp serve a Claude per correlare un frame con la frase esatta
+    della trascrizione (via ReferenceItem.transcript_segments), invece di
+    indovinare l'allineamento guardando solo le immagini in sequenza."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Impossibile aprire il video: {video_path}")
@@ -180,10 +189,11 @@ def sample_frames(video_path: Path, output_dir: Path, *, count: int = 5) -> list
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
             raise RuntimeError(f"Video senza frame leggibili: {video_path}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
         output_dir.mkdir(parents=True, exist_ok=True)
         n = min(count, total_frames)
-        paths = []
+        frames = []
         for i in range(n):
             frame_idx = round(i * (total_frames - 1) / (n - 1)) if n > 1 else 0
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -192,10 +202,10 @@ def sample_frames(video_path: Path, output_dir: Path, *, count: int = 5) -> list
                 continue
             out_path = output_dir / f"analysis_frame_{i:02d}.jpg"
             cv2.imwrite(str(out_path), frame)
-            paths.append(out_path)
+            frames.append(SampledFrame(path=out_path, timestamp_sec=frame_idx / fps))
 
-        if not paths:
+        if not frames:
             raise RuntimeError(f"Nessun frame estratto da {video_path}")
-        return paths
+        return frames
     finally:
         cap.release()

@@ -11,6 +11,10 @@ import pytest
 
 from aicraft.production import claude_creative
 from aicraft.production.character import CharacterProfile
+from aicraft.production.frame_picker import SampledFrame
+
+_FRAME = SampledFrame(path="f0.jpg", timestamp_sec=0.0)
+_FRAMES_2 = [SampledFrame(path="f0.jpg", timestamp_sec=0.0), SampledFrame(path="f1.jpg", timestamp_sec=4.0)]
 
 _CHAR = CharacterProfile(
     creator_nome="Test",
@@ -148,7 +152,7 @@ def test_write_carousel_prompts_esaurisce_retry_e_ritorna_comunque(monkeypatch, 
 def test_write_talking_video_prompt_rifiuta_senza_frame():
     with pytest.raises(ValueError):
         claude_creative.write_talking_video_prompt(
-            frame_paths=[], transcript="ciao", character=_CHAR, content_type="video_talking",
+            frames=[], transcript="ciao", character=_CHAR, content_type="video_talking",
             source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
         )
 
@@ -156,7 +160,7 @@ def test_write_talking_video_prompt_rifiuta_senza_frame():
 def test_write_talking_video_prompt_rifiuta_senza_transcript():
     with pytest.raises(ValueError):
         claude_creative.write_talking_video_prompt(
-            frame_paths=["f.jpg"], transcript="   ", character=_CHAR, content_type="video_talking",
+            frames=[_FRAME], transcript="   ", character=_CHAR, content_type="video_talking",
             source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
         )
 
@@ -165,7 +169,7 @@ def test_write_talking_video_prompt_assembla_col_personaggio(monkeypatch):
     monkeypatch.setattr(claude_creative, "run_headless", lambda prompt, **kw: "STYLE: selfie. DIALOGUE: 'ciao'.")
 
     result = claude_creative.write_talking_video_prompt(
-        frame_paths=["f0.jpg", "f1.jpg"], transcript="ciao a tutti", character=_CHAR,
+        frames=_FRAMES_2, transcript="ciao a tutti", character=_CHAR,
         content_type="video_talking", source_category="TALKING", duration_seconds=8.0,
         use_video_reference=False,
     )
@@ -180,7 +184,7 @@ def test_write_talking_video_prompt_gestisce_fence_markdown(monkeypatch):
     monkeypatch.setattr(claude_creative, "run_headless", lambda prompt, **kw: "```\nSTYLE: selfie.\n```")
 
     result = claude_creative.write_talking_video_prompt(
-        frame_paths=["f0.jpg"], transcript="ciao", character=_CHAR, content_type="video_talking",
+        frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
         source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
     )
 
@@ -193,7 +197,7 @@ def test_write_talking_video_prompt_risposta_vuota_solleva_errore(monkeypatch):
 
     with pytest.raises(claude_creative.ClaudeCreativeError):
         claude_creative.write_talking_video_prompt(
-            frame_paths=["f0.jpg"], transcript="ciao", character=_CHAR, content_type="video_talking",
+            frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
             source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
         )
 
@@ -208,16 +212,44 @@ def test_write_talking_video_prompt_menziona_uso_video_reference_solo_se_attivo(
     monkeypatch.setattr(claude_creative, "run_headless", fake_run_headless)
 
     claude_creative.write_talking_video_prompt(
-        frame_paths=["f0.jpg"], transcript="ciao", character=_CHAR, content_type="video_talking",
+        frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
         source_category="TALKING", duration_seconds=5.0, use_video_reference=True,
     )
     claude_creative.write_talking_video_prompt(
-        frame_paths=["f0.jpg"], transcript="ciao", character=_CHAR, content_type="video_talking",
+        frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
         source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
     )
 
     assert "SOLO come riferimento di movimento" in seen_prompts[0]
     assert "Non c'e' nessun video di riferimento" in seen_prompts[1]
+
+
+def test_write_talking_video_prompt_usa_timestamp_segmenti_quando_presenti(monkeypatch):
+    seen_prompts = []
+
+    def fake_run_headless(prompt, **kw):
+        seen_prompts.append(prompt)
+        return "scena finta"
+
+    monkeypatch.setattr(claude_creative, "run_headless", fake_run_headless)
+
+    segments = [{"start": 0.0, "end": 2.1, "text": "ciao a tutti"}, {"start": 2.1, "end": 4.5, "text": "oggi vi mostro"}]
+
+    claude_creative.write_talking_video_prompt(
+        frames=_FRAMES_2, transcript="ciao a tutti oggi vi mostro", transcript_segments=segments,
+        character=_CHAR, content_type="video_talking", source_category="TALKING",
+        duration_seconds=5.0, use_video_reference=False,
+    )
+    claude_creative.write_talking_video_prompt(
+        frames=[_FRAME], transcript="ciao", transcript_segments=None,
+        character=_CHAR, content_type="video_talking", source_category="TALKING",
+        duration_seconds=5.0, use_video_reference=False,
+    )
+
+    assert "TIMESTAMP ESATTI" in seen_prompts[0]
+    assert "0.0s" in seen_prompts[0] and "2.1s" in seen_prompts[0]
+    assert "[0.0s]" in seen_prompts[0]  # timestamp del frame stesso, non solo dei segmenti
+    assert "TIMESTAMP ESATTI" not in seen_prompts[1]  # senza segmenti: degrada al comportamento precedente
 
 
 def test_adapt_original_caption_and_hashtags_parsa_json(monkeypatch):

@@ -27,35 +27,26 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Prossimo blocco consigliato: rifiniture operative + qualita' produzione.**
-I primi 5 punti richiesti dall'utente sono implementati (caption originale, produzione reale
-protetta, sync settimanale, policy per categoria, stati errore reference). Ora i prossimi passi
-piu' sensati sono:
-- fare un micro job reale Higgsfield controllato da UI con 1 solo contenuto pronto, cosi' si
-  valida il nuovo pulsante "Produci davvero" senza usare un piano grande;
-- migliorare la schermata "Oggi" con agenda del giorno, stato produzione e prossime azioni;
-- aggiungere controlli di dettaglio in Libreria (filtri per categoria/stato, retry singolo,
-  apertura cartella locale);
-- affinare analisi video talking con piu' frame e timestamp Whisper (vedi sezione sotto).
+**Non c'e' un prossimo task ovvio senza una decisione dell'utente.** Tutti i punti che avevano
+un'implementazione chiara e non richiedevano spendere crediti veri sono stati fatti (vedi
+checklist sotto: solo i punti 3 e 5 restano aperti). Prima di continuare, CHIEDI all'utente quale
+di questi vuole affrontare, non sceglierlo in autonomia:
+- **Punto 3**: verifiche con job Higgsfield REALI mai fatte (costano crediti veri, l'utente ha
+  sempre voluto autorizzarle esplicitamente una per una, mai in automatico).
+- **Punto 5**: decidere se serve uno stato dedicato su `ContentPiece` per i rifiuti di contenuto
+  di Claude (oggi genericamente "error") — proposto piu' volte, mai confermato in scope.
+- In alternativa: altre rifiniture di qualita' emerse durante l'uso reale (vedi sezione "Da
+  migliorare" dentro l'app).
 
 ## Intenzioni discusse in chat, non ancora implementate
 
-- **Precisione dell'analisi video talking (discusso 15/07/2026, subito dopo l'implementazione
-  del punto 1).** L'utente ha fatto notare, giustamente, che `frame_picker.sample_frames`
-  campiona solo 5 frame equispaziati su un video fino a 15s — troppo rado, produce un'analisi
-  approssimativa dei movimenti. Due leve concrete discusse ma non implementate:
-  1. Alzare `engine.ANALYSIS_FRAME_COUNT` (oggi 5) a qualcosa tipo 1 frame/secondo — costa solo
-     piu' chiamate Read di Claude (incluse nell'abbonamento), non crediti Higgsfield.
-  2. Aggiungere timestamp per segmento alla trascrizione Whisper (oggi `ReferenceItem.transcript`
-     e' solo testo piatto — `faster-whisper` supporta nativamente i timestamp per segmento, non
-     ancora usati) cosi' Claude puo' sapere A CHE SECONDO viene detta ogni frase e correlarla
-     al frame giusto, invece di indovinare l'allineamento.
-  Nessuna delle due e' stata implementata in questa sessione per limiti di token residui.
+(nessuna aperta al momento — l'unica in sospeso, la precisione dell'analisi video talking, e'
+stata implementata il 15/07/2026 sera, vedi log sotto e doc §15.1)
 
-## Checklist "cosa manca per essere operativo al 100%" (stato 15/07/2026 sera)
+## Checklist "cosa manca per essere operativo al 100%" (stato 15/07/2026 sera, aggiornata dopo review)
 
-1. [x] Analisi video per i talking/caption (dialogo verbatim, movimenti dai frame, audio) — vedi
-       doc §12.15. Aperto solo l'affinamento sopra (frame density/timestamp).
+1. [x] Analisi video per i talking/caption (dialogo verbatim, movimenti dai frame, audio,
+       densita' frame dinamica, timestamp Whisper per segmento) — vedi doc §12.15 e §15.1.
 2. [x] Caption originale: `downloader.download_reference` salva `original_caption` su
        `ReferenceItem`; lo stadio caption/hashtag ora la adatta invece di inventare da zero
        quando e' disponibile.
@@ -70,9 +61,33 @@ piu' sensati sono:
        "error") — proposto, mai confermato in scope dall'utente.
 6. [x] UI produzione reale + Libreria: bottone "Produci davvero" con conferma esplicita e
        guardia budget; "Aggiorna libreria" usa la policy per categoria.
-7. [ ] **Rifiniture operative UI — vedi "Task su cui lavorare adesso" sopra. PROSSIMO TASK.**
+7. [x] Rifiniture operative UI: agenda del giorno in "Oggi" (§15.2), filtri/retry
+       singolo/apertura cartella in Libreria (§15.3).
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 (sessione Claude — review del lavoro Codex + rifiniture richieste)
+
+- **Review completa** del commit Codex (`c9aa930`, 1745 righe): letto ogni diff dei file critici
+  a mano (non solo il changelog), verificata idempotenza dell'allocator, correttezza della
+  migrazione DB additiva, sicurezza dello scheduler (plistlib, no shell string), confermato con
+  l'utente che il passaggio Google Sheet da read-only a read-write era intenzionale.
+- **Bug corretto**: `reference_sync.run_once()` non ritentava gli stati granulari
+  (`download_error`/`unavailable`/`private`/`transcription_error`), solo `run_policy_once()` lo
+  faceva — item bloccati per sempre con `references sync` normale. Unificato in
+  `RETRYABLE_STATUSES`, una sola costante di modulo. Vedi doc §15 (introduzione).
+- **Densita' frame + timestamp Whisper** per l'analisi video talking (era rimasto aperto dalla
+  sessione precedente): frame dinamici (~1/secondo, minimo 5) invece di 5 fissi;
+  `transcriber.transcribe()` non scarta piu' i segmenti Whisper (nuova colonna
+  `ReferenceItem.transcript_segments`); `write_talking_video_prompt` correla dialogo e frame per
+  timestamp esatto quando disponibili. Vedi doc §15.1.
+- **Vista "Oggi" con agenda del giorno**: nuovo endpoint `today_agenda`, sezione UI con i
+  contenuti pianificati per oggi (stato, reference assegnata o no) e avvisi contestuali. Vedi doc
+  §15.2.
+- **Libreria**: filtri per stato/categoria (`list_references`), retry singolo per reference
+  fallita (`retry_reference`, non tocca lo Sheet), apertura cartella locale in Finder
+  (`open_reference_folder`, percorso verificato dentro `MEDIA_DIR` per sicurezza). Vedi doc §15.3.
+- 158 test verdi. Commit + push su `origin/main`.
 
 ### 15/07/2026 (sessione Codex — primi 5 punti operativi)
 

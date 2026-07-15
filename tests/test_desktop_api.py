@@ -44,6 +44,49 @@ def test_overview_vuoto(api):
     assert r["overview"]["profili"] == []
 
 
+def test_today_agenda_senza_profilo_attivo(api):
+    r = api.today_agenda()
+    assert r["ok"]
+    assert r["has_profile"] is False
+    assert r["pieces"] == []
+
+
+def test_today_agenda_senza_piano_per_la_settimana_corrente(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.set_active_profile(1)
+
+    r = api.today_agenda()
+    assert r["ok"]
+    assert r["has_profile"] is True
+    assert r["plan"] is None
+    assert r["pieces"] == []
+
+
+def test_today_agenda_con_piano_e_pezzo_pianificato_oggi(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.set_active_profile(1)
+
+    today = dt.date.today()
+    week_start = today - dt.timedelta(days=today.weekday())
+    week_end = week_start + dt.timedelta(days=6)
+    giorni = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"]
+    oggi_giorno = giorni[today.weekday()]
+
+    plan = api.create_plan(1, week_start.isoformat(), week_end.isoformat())
+    plan_id = plan["plan"]["id"]
+    api.plan_set_cell(plan_id, "carosello", oggi_giorno, 1)
+
+    r = api.today_agenda()
+    assert r["ok"]
+    assert r["giorno"] == oggi_giorno
+    assert r["plan"]["id"] == plan_id
+    assert len(r["pieces"]) == 1
+    assert r["pieces"][0]["content_type"] == "carosello"
+    assert r["pieces"][0]["has_reference"] is False
+
+
 def test_creator_e_profilo_flow(api):
     assert api.create_creator("Trinity")["ok"]
     r = api.create_profile(1, "Ruby Wilde", "misto")
@@ -336,3 +379,118 @@ def test_backlog_set_status_e_filtro(api):
 
     tutte = api.list_backlog(status="tutti")
     assert len(tutte["notes"]) == 2
+
+
+def _seed_reference(status="ready", category="BOOBS", local_video_path=None, frame_paths=None, downloaded_at=None):
+    return ReferenceItem(
+        source_url=f"https://www.instagram.com/p/{status}-{category}/",
+        source_tab="CAROSELLI",
+        source_category=category,
+        content_type_hint="carosello",
+        status=status,
+        local_video_path=local_video_path,
+        frame_paths=frame_paths or [],
+        downloaded_at=downloaded_at,
+    )
+
+
+def test_list_references_filtra_per_stato_e_categoria(api):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="ready", category="BOOBS"),
+            _seed_reference(status="error", category="BOOBS"),
+            _seed_reference(status="ready", category="TALKING"),
+        ])
+        session.commit()
+
+    tutte = api.list_references()
+    assert len(tutte["references"]) == 3
+
+    solo_ready = api.list_references(status="ready")
+    assert len(solo_ready["references"]) == 2
+    assert all(r["status"] == "ready" for r in solo_ready["references"])
+
+    solo_boobs_ready = api.list_references(status="ready", category="BOOBS")
+    assert len(solo_boobs_ready["references"]) == 1
+    assert solo_boobs_ready["references"][0]["source_category"] == "BOOBS"
+
+
+def test_retry_reference_chiama_reference_sync(api, monkeypatch):
+    seen = {}
+
+    def fake_retry_reference(reference_id):
+        seen["id"] = reference_id
+        return {"id": reference_id, "status": "ready", "error_message": None}
+
+    monkeypatch.setattr(api_mod.reference_sync, "retry_reference", fake_retry_reference)
+
+    r = api.retry_reference(42)
+
+    assert r["ok"]
+    assert seen["id"] == 42
+    assert r["retry"]["status"] == "ready"
+
+
+def test_open_reference_folder_reference_inesistente(api):
+    r = api.open_reference_folder(999)
+    assert r["ok"] is False
+    assert "inesistente" in r["error"]
+
+
+def test_open_reference_folder_senza_media_locale(api):
+    with api_mod.SessionLocal() as session:
+        ref = _seed_reference(status="pending")
+        session.add(ref)
+        session.commit()
+        ref_id = ref.id
+
+    r = api.open_reference_folder(ref_id)
+    assert r["ok"] is False
+    assert "cartella locale" in r["error"]
+
+
+def test_open_reference_folder_apre_cartella_dentro_media_dir(api, monkeypatch, tmp_path):
+    media_root = tmp_path / "media"
+    folder = media_root / "2026-W29" / "CAROSELLI" / "BOOBS" / "ABC123"
+    folder.mkdir(parents=True)
+    video = folder / "video.mp4"
+    video.write_bytes(b"finto")
+
+    monkeypatch.setattr(api_mod.config, "MEDIA_DIR", media_root)
+
+    with api_mod.SessionLocal() as session:
+        ref = _seed_reference(status="ready", local_video_path=str(video))
+        session.add(ref)
+        session.commit()
+        ref_id = ref.id
+
+    calls = []
+    monkeypatch.setattr(api_mod.subprocess, "run", lambda args, **kw: calls.append(args))
+
+    r = api.open_reference_folder(ref_id)
+
+    assert r["ok"]
+    assert r["folder"] == str(folder)
+    assert calls == [["open", str(folder)]]
+
+
+def test_open_reference_folder_rifiuta_percorso_fuori_media_dir(api, monkeypatch, tmp_path):
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    outside = tmp_path / "altrove"
+    outside.mkdir()
+    video = outside / "video.mp4"
+    video.write_bytes(b"finto")
+
+    monkeypatch.setattr(api_mod.config, "MEDIA_DIR", media_root)
+
+    with api_mod.SessionLocal() as session:
+        ref = _seed_reference(status="ready", local_video_path=str(video))
+        session.add(ref)
+        session.commit()
+        ref_id = ref.id
+
+    r = api.open_reference_folder(ref_id)
+
+    assert r["ok"] is False
+    assert "sicurezza" in r["error"]

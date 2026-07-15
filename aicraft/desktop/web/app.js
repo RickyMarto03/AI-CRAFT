@@ -1,7 +1,7 @@
 'use strict';
 
 /* ============ Bridge & stato ============ */
-const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto' };
+const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' } };
 
 async function call(method, ...args) {
   try {
@@ -22,6 +22,20 @@ const DAY_LABELS = { lun: 'Lun', mar: 'Mar', mer: 'Mer', gio: 'Gio', ven: 'Ven',
 const TIPO_LABELS = { solo_talking: 'Solo talking', solo_balletti: 'Solo balletti', misto: 'Misto' };
 const BACKLOG_STATUS_LABELS = { aperto: 'Aperto', fatto: 'Fatto', scartato: 'Scartato', tutti: 'Tutti' };
 const BACKLOG_STATUS_BADGE = { aperto: 'amber', fatto: 'green', scartato: 'gray' };
+const PIECE_STATUS_LABELS = {
+  reference_ready: 'Da produrre', image_regen: 'Foto in corso', video_regen: 'Video in corso',
+  qa: 'QA in corso', caption_hashtag: 'Caption in corso', delivered: 'Consegnato',
+  error: 'Errore', blocked_nsfw: 'Bloccato (NSFW)', too_long: 'Video troppo lungo',
+};
+const PIECE_STATUS_BADGE = {
+  reference_ready: 'gray', image_regen: 'amber', video_regen: 'amber', qa: 'amber',
+  caption_hashtag: 'amber', delivered: 'green', error: 'red', blocked_nsfw: 'red', too_long: 'red',
+};
+const REF_STATUS_BADGE = {
+  ready: 'green', pending: 'gray', downloading: 'amber', transcribing: 'amber',
+  error: 'red', download_error: 'red', private: 'red', unavailable: 'red', transcription_error: 'red',
+};
+const REF_RETRYABLE_STATUSES = ['error', 'download_error', 'private', 'unavailable', 'transcription_error'];
 
 /* ============ Utility ============ */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -97,20 +111,23 @@ function chipStrip(items) {
 
 /* ============ Vista: Oggi ============ */
 VIEWS.oggi = async () => {
-  const r = await call('overview');
+  const [r, agenda] = await Promise.all([call('overview'), call('today_agenda')]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const o = r.overview;
   const cp = o.content_per_stato || {};
   const totContent = Object.values(cp).reduce((a, b) => a + b, 0);
   const delivered = cp['delivered'] || 0;
   const bal = o.saldo_crediti;
+
   return head('Oggi', 'Panoramica rapida del tuo lavoro') +
     chipStrip([
       { label: 'Saldo', value: fmt(bal) + ' CR', color: bal < 0 ? '#ff6b5e' : '#8fe23a' },
       { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
       { label: 'Contenuti', value: totContent + ' (' + delivered + ' consegnati)' },
       { label: 'Reference', value: Object.values(o.reference_per_stato || {}).reduce((a, b) => a + b, 0), color: '#e8b23d' },
-    ]) + `
+    ]) +
+    `<div class="section-title">Agenda di oggi (${DAY_LABELS[agenda.giorno] || agenda.giorno || ''})</div>` +
+    agendaSection(agenda) + `
     <div class="section-title">Profili</div>
     ${o.profili.length ? '<div class="plist">' + o.profili.map((p) => `
       <div class="prow ${p.attivo ? '' : ''}">
@@ -121,6 +138,43 @@ VIEWS.oggi = async () => {
       </div>`).join('') + '</div>' : '<div class="empty">Nessun profilo. Vai su <b>Creator</b> per crearne uno.</div>'}
   `;
 };
+
+function agendaSection(agenda) {
+  if (!agenda || !agenda.ok) {
+    return `<div class="empty">${esc(agenda ? agenda.error : 'Impossibile leggere l\'agenda')}</div>`;
+  }
+  if (!agenda.has_profile) {
+    return '<div class="empty">Nessun profilo attivo. Selezionane uno per vedere l\'agenda del giorno.</div>';
+  }
+  if (!agenda.plan) {
+    return `<div class="empty">Nessun piano copre la settimana corrente per <b>${esc(agenda.profile_nome)}</b>.
+      <button class="btn sm" data-action="goto-view" data-view="piano" style="margin-left:8px">Vai al Piano</button></div>`;
+  }
+  const pieces = agenda.pieces || [];
+  const missingRef = pieces.filter((p) => !p.has_reference).length;
+  const actions = [];
+  if (agenda.plan.status === 'bozza') {
+    actions.push('Il piano di questa settimana e\' ancora in bozza — approvalo per metterlo in produzione.');
+  }
+  if (missingRef) {
+    actions.push(`${missingRef} pezzo/i di oggi senza reference assegnata — aggiorna la Libreria o assegna reference nel Piano.`);
+  }
+  const actionsHtml = actions.length
+    ? `<div class="warn-list" style="margin-bottom:12px">${actions.map((a) => `<div class="warn">${esc(a)}</div>`).join('')}</div>`
+    : '';
+  if (!pieces.length) {
+    return actionsHtml + '<div class="empty">Nessun contenuto pianificato per oggi.</div>';
+  }
+  const rows = pieces.map((p) => `
+    <div class="prow">
+      <span class="dc-dot" style="background:${CT_COLORS[p.content_type] || '#4c8bf5'};width:9px;height:9px;border-radius:50%;flex-shrink:0"></span>
+      <div><div class="p-name">${CT_LABELS[p.content_type] || esc(p.content_type)}</div>
+        <div class="faint">${p.has_reference ? 'reference assegnata' : 'reference mancante'}</div></div>
+      <div class="spacer"></div>
+      <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span>
+    </div>`).join('');
+  return actionsHtml + `<div class="plist">${rows}</div>`;
+}
 
 /* ============ Vista: Creator ============ */
 VIEWS.creator = async () => {
@@ -270,7 +324,11 @@ VIEWS.produzione = async () => {
 
 /* ============ Vista: Libreria ============ */
 VIEWS.libreria = async () => {
-  const r = await call('reference_stats');
+  const filter = state.libFilter || { status: '', category: '' };
+  const [r, listed] = await Promise.all([
+    call('reference_stats'),
+    call('list_references', filter.status || null, filter.category || null, 50),
+  ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const statusRows = Object.keys(r.by_status || {}).length
     ? Object.entries(r.by_status).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
@@ -285,11 +343,32 @@ VIEWS.libreria = async () => {
     ? r.latest.map((x) => `<div class="prow">
         <div class="p-avatar">${esc((x.source_category || '?')[0])}</div>
         <div style="min-width:0">
-          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${x.status === 'ready' ? 'green' : x.status === 'error' ? 'red' : 'gray'}">${esc(x.status)}</span></div>
+          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span></div>
           <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')} ${x.has_caption ? '· caption' : ''}</div>
         </div>
       </div>`).join('')
     : '<div class="empty">Nessun download recente.</div>';
+
+  const statusOpts = ['', ...Object.keys(r.by_status || {})].map((s) =>
+    `<option value="${esc(s)}" ${filter.status === s ? 'selected' : ''}>${s ? esc(s) : 'Tutti gli stati'}</option>`).join('');
+  const categoryNames = [...new Set(Object.keys(r.by_category || {}).map((k) => k.split(' / ').pop()))];
+  const categoryOpts = ['', ...categoryNames].map((c) =>
+    `<option value="${esc(c)}" ${filter.category === c ? 'selected' : ''}>${c ? esc(c) : 'Tutte le categorie'}</option>`).join('');
+
+  const filteredRows = listed.ok && (listed.references || []).length
+    ? listed.references.map((x) => `
+      <div class="prow">
+        <div class="p-avatar">${esc((x.source_category || '?')[0])}</div>
+        <div style="min-width:0">
+          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span></div>
+          <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')}${x.has_caption ? ' · caption' : ''}${x.error_message ? ' · ' + esc(x.error_message) : ''}</div>
+        </div>
+        <div class="spacer"></div>
+        ${REF_RETRYABLE_STATUSES.includes(x.status) ? `<button class="btn sm" data-action="reference-retry" data-id="${x.id}">Riprova</button>` : ''}
+        ${x.has_local_media ? `<button class="btn sm" data-action="reference-open-folder" data-id="${x.id}">Apri cartella</button>` : ''}
+      </div>`).join('')
+    : '<div class="empty">Nessuna reference con questo filtro.</div>';
+
   const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>`;
   return head('Libreria', 'Magazzino operativo delle reference', actions) +
     chipStrip([
@@ -307,6 +386,12 @@ VIEWS.libreria = async () => {
     </div>
     <div class="section-title">Ultimi scaricati</div>
     <div class="plist">${latestRows}</div>
+    <div class="section-title">Reference (filtrabili, retry/apertura cartella)</div>
+    <div class="row wrap" style="margin-bottom:12px">
+      <select id="libFilterStatus" data-change="lib-filter-status">${statusOpts}</select>
+      <select id="libFilterCategory" data-change="lib-filter-category">${categoryOpts}</select>
+    </div>
+    <div class="plist">${filteredRows}</div>
     <div class="faint" style="margin-top:12px">Finestra pesca: ultime ${r.selection_weeks} settimane · pulizia reference IG dopo ${r.retention_days} giorni.</div>`;
 };
 
@@ -406,6 +491,7 @@ VIEWS.backlog = async () => {
 async function reloadPlanView() { await setView('piano'); }
 
 const ACTIONS = {
+  'goto-view': (el) => setView(el.dataset.view),
   'profile-activate': async (el) => {
     const r = await call('set_active_profile', Number(el.dataset.id));
     if (r.ok) { toast('Profilo attivo aggiornato'); state.profiles = []; await refreshTopProfileSwitch(); await setView('creator'); } else toast(r.error, 'err');
@@ -485,6 +571,16 @@ const ACTIONS = {
     const r = await call('references_sync_policy');
     r.ok ? (toast('Libreria aggiornata · processati ' + (r.sync?.processed ?? '—') + ' · pronte ' + r.ready), setView('libreria')) : toast(r.error, 'err');
   },
+  'reference-retry': async (el) => {
+    const id = Number(el.dataset.id);
+    toast('Riprovo…');
+    const r = await call('retry_reference', id);
+    if (r.ok) { toast('Nuovo stato: ' + r.retry.status); setView('libreria'); } else toast(r.error, 'err');
+  },
+  'reference-open-folder': async (el) => {
+    const r = await call('open_reference_folder', Number(el.dataset.id));
+    r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
+  },
   'prod-preview': async () => {
     const r = await call('production_preview');
     r.ok ? toast(r.ready_count + ' pronti · stima ' + fmt(r.estimated_cost) + ' CR (nessun credito speso)') : toast(r.error, 'err');
@@ -540,7 +636,12 @@ document.addEventListener('change', async (e) => {
     await call('set_active_profile', Number(sw.value));
     state.profiles = []; state.currentPlan = null;
     if (state.view === 'piano' || state.view === 'costi') setView(state.view);
+    return;
   }
+  const libStatus = e.target.closest('[data-change="lib-filter-status"]');
+  if (libStatus) { state.libFilter.status = libStatus.value; setView('libreria'); return; }
+  const libCategory = e.target.closest('[data-change="lib-filter-category"]');
+  if (libCategory) { state.libFilter.category = libCategory.value; setView('libreria'); }
 });
 
 /* ============ Avvio ============ */

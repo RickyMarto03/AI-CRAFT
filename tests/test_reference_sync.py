@@ -1,5 +1,10 @@
 import datetime as dt
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from aicraft.db.base import Base
 from aicraft.db.models import ContentPiece, Creator, PlanWeek, Profile, ReferenceItem
 from aicraft.reference_sync import sync
 from aicraft.reference_sync.sheets_reader import SheetReference
@@ -70,6 +75,18 @@ def test_status_for_processing_error_distingue_casi_utili():
     assert sync._status_for_processing_error(RuntimeError("timeout")) == "download_error"
 
 
+def test_retryable_statuses_copre_tutti_gli_stati_di_errore_granulari():
+    """Regressione (15/07/2026): run_once() aveva una RETRYABLE_STATUSES piu'
+    corta di run_policy_once(), quindi un item fallito con uno stato granulare
+    (download_error/unavailable/private/transcription_error) restava bloccato
+    per sempre con `references sync` mentre veniva ritentato solo con
+    `sync-policy`. Ora entrambe le funzioni leggono la stessa costante: questo
+    test blocca il caso in cui uno stato prodotto da _status_for_processing_error
+    smetta di essere ritentabile."""
+    stati_possibili = {"unavailable", "private", "transcription_error", "download_error"}
+    assert stati_possibili <= set(sync.RETRYABLE_STATUSES)
+
+
 def test_cleanup_old_references_cancella_solo_reference_e_scollega_content(tmp_path, db_session, monkeypatch):
     media_root = tmp_path / "media"
     media_root.mkdir()
@@ -102,3 +119,47 @@ def test_cleanup_old_references_cancella_solo_reference_e_scollega_content(tmp_p
     assert db_session.get(ReferenceItem, ref.id) is None
     assert piece.reference_id is None
     assert not old_file.exists()
+
+
+def _isolated_session_factory(tmp_path, name):
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def test_retry_reference_carica_item_e_chiama_process_item(monkeypatch, tmp_path):
+    """retry_reference apre una PROPRIA sessione (azione manuale isolata
+    dalla Libreria, non serve un nuovo giro di lettura sheet): qui la
+    isoliamo su un DB temporaneo dedicato invece di riusare db_session."""
+    TestSession = _isolated_session_factory(tmp_path, "retry.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    with TestSession() as session:
+        item = ReferenceItem(source_url="https://www.instagram.com/p/RETRY/", status="download_error")
+        session.add(item)
+        session.commit()
+        item_id = item.id
+
+    seen = {}
+
+    def fake_process_item(session, item, **kw):
+        seen["called_with_id"] = item.id
+        seen["sheet_ref"] = kw.get("sheet_ref")
+        item.status = "ready"
+
+    monkeypatch.setattr(sync, "process_item", fake_process_item)
+
+    result = sync.retry_reference(item_id)
+
+    assert seen["called_with_id"] == item_id
+    assert result == {"id": item_id, "status": "ready", "error_message": None}
+
+
+def test_retry_reference_id_inesistente_solleva_errore(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry2.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    with pytest.raises(ValueError):
+        sync.retry_reference(999)

@@ -42,7 +42,20 @@ MAX_VIDEO_DURATION_SECONDS = 15.0
 # Quanti frame campionare lungo l'intero video originale per l'analisi
 # visiva (movimenti/outfit/background) dei talking/caption — vedi
 # claude_creative.write_talking_video_prompt e frame_picker.sample_frames.
-ANALYSIS_FRAME_COUNT = 5
+#
+# Un valore fisso basso (5, la versione precedente) copre un video di 15s
+# con un frame ogni ~3s: troppo rado per catturare gesti/espressioni che
+# cambiano rapidamente — segnalato dall'utente il 15/07/2026 dopo aver
+# visto quanto approssimativa restava l'analisi. Ora e' dinamico: circa 1
+# frame al secondo (ANALYSIS_FRAMES_PER_SECOND), con un minimo cosi' i clip
+# cortissimi restano comunque ben coperti. Costa solo piu' chiamate Read di
+# Claude (incluse nell'abbonamento), non crediti Higgsfield.
+ANALYSIS_FRAMES_PER_SECOND = 1.0
+ANALYSIS_MIN_FRAME_COUNT = 5
+
+
+def _analysis_frame_count(duration_seconds: float) -> int:
+    return max(ANALYSIS_MIN_FRAME_COUNT, round(duration_seconds * ANALYSIS_FRAMES_PER_SECOND))
 
 
 class VideoTooLongError(RuntimeError):
@@ -175,13 +188,15 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
     duration_seconds = qa.get_duration_seconds(video_path)
 
     frame_output_dir = video_path.with_name(video_path.stem + "_analysis_frames")
-    analysis_frames = frame_picker.sample_frames(video_path, frame_output_dir, count=ANALYSIS_FRAME_COUNT)
+    frame_count = _analysis_frame_count(duration_seconds)
+    analysis_frames = frame_picker.sample_frames(video_path, frame_output_dir, count=frame_count)
 
     use_video_reference = settings.get_flag(session, settings.SEEDANCE_USE_VIDEO_REFERENCE)
 
     prompt = claude_creative.write_talking_video_prompt(
-        frame_paths=[str(p) for p in analysis_frames],
+        frames=analysis_frames,
         transcript=reference.transcript or "",
+        transcript_segments=reference.transcript_segments or None,
         character=char,
         content_type=piece.content_type,
         source_category=reference.source_category or "",

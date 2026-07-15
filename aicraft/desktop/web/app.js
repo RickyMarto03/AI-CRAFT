@@ -2,7 +2,7 @@
 
 /* ============ Bridge & stato ============ */
 const state = {
-  meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi',
+  meta: null, profiles: [], activeProfileId: null, currentPlan: null, planWeekStart: null, view: 'oggi',
   backlogFilter: 'aperto', backlogSearch: '',
   libFilter: { status: '', category: '', search: '', page: 0 },
   expandedPieceId: null, showMonthly: false, showAllocPreview: false, showDryRun: false,
@@ -277,12 +277,22 @@ async function ensurePlan() {
   if (!active) return null;
   state.activeProfileId = active.id;
   const lp = await call('list_plans', active.id);
-  if (lp.ok && lp.plans.length) {
-    const g = await call('get_plan', lp.plans[0].id);
+  const plans = lp.ok ? lp.plans : [];
+  if (!state.planWeekStart && plans.length) state.planWeekStart = plans[0].week_start; // piu' recente per default
+  const match = plans.find((p) => p.week_start === state.planWeekStart);
+  if (match) {
+    const g = await call('get_plan', match.id);
     if (g.ok) { state.currentPlan = g.plan; return active; }
   }
   state.currentPlan = null;
   return active;
+}
+
+function weekNavHtml() {
+  return `<div class="row" style="margin-bottom:12px">
+    <button class="btn sm" data-action="plan-week-prev">‹ Settimana prec.</button>
+    <button class="btn sm" data-action="plan-week-next">Settimana succ. ›</button>
+  </div>`;
 }
 
 VIEWS.piano = async () => {
@@ -293,9 +303,11 @@ VIEWS.piano = async () => {
   }
 
   if (!state.currentPlan) {
-    const [ws, we] = currentWeek();
-    return head('Piano', 'Calendario editoriale · ' + esc(active.nome)) + `
-      <div class="card hero"><div class="hs-title" style="font-size:19px">Nessun piano per questo profilo</div>
+    const ws = state.planWeekStart || currentWeek()[0];
+    const we = addDays(ws, 6);
+    return head('Piano', 'Calendario editoriale · ' + esc(active.nome)) +
+      weekNavHtml() + `
+      <div class="card hero"><div class="hs-title" style="font-size:19px">Nessun piano per la settimana ${prettyDate(ws)} → ${prettyDate(we)}</div>
       <div class="muted" style="margin:8px 0 16px">Crea il piano della settimana per iniziare a distribuire i contenuti.</div>
       <div class="row"><span class="faint">Settimana</span><input id="planWs" type="date" value="${ws}" />
         <span class="faint">→</span><input id="planWe" type="date" value="${we}" />
@@ -357,7 +369,7 @@ VIEWS.piano = async () => {
   }
 
   return head('Piano', 'Calendario editoriale · ' + prettyDate(pl.week_start) + ' → ' + prettyDate(pl.week_end), actions) +
-    updatedNote +
+    updatedNote + weekNavHtml() +
     chipStrip(cts.map((ct) => ({ label: CT_LABELS[ct], value: pl.totals_by_type[ct], color: CT_COLORS[ct] }))
       .concat([{ label: 'Totale', value: pl.total, color: '#4c8bf5' }])) +
     `<div class="week-strip">${cards}</div>` +
@@ -894,7 +906,7 @@ const ACTIONS = {
   'goto-view': (el) => setView(el.dataset.view),
   'profile-activate': async (el) => {
     const r = await call('set_active_profile', Number(el.dataset.id));
-    if (r.ok) { toast('Profilo attivo aggiornato'); state.profiles = []; await refreshTopProfileSwitch(); await setView('creator'); } else toast(r.error, 'err');
+    if (r.ok) { toast('Profilo attivo aggiornato'); state.profiles = []; state.planWeekStart = null; await refreshTopProfileSwitch(); await setView('creator'); } else toast(r.error, 'err');
   },
   'profile-delete': async (el) => {
     const id = Number(el.dataset.id), nome = el.dataset.name;
@@ -936,8 +948,22 @@ const ACTIONS = {
     const newWs = addDays(pl.week_end, 1);
     const newWe = addDays(newWs, 6);
     const r = await call('duplicate_plan', pl.id, newWs, newWe);
-    if (r.ok) { toast('Piano duplicato su ' + prettyDate(newWs) + ' → ' + prettyDate(newWe)); state.currentPlan = null; reloadPlanView(); }
-    else toast(r.error, 'err');
+    if (r.ok) {
+      toast('Piano duplicato su ' + prettyDate(newWs) + ' → ' + prettyDate(newWe));
+      state.currentPlan = null; state.planWeekStart = newWs; reloadPlanView();
+    } else toast(r.error, 'err');
+  },
+  'plan-week-prev': () => {
+    const ws = state.planWeekStart || (state.currentPlan ? state.currentPlan.week_start : currentWeek()[0]);
+    state.planWeekStart = addDays(ws, -7);
+    state.currentPlan = null;
+    reloadPlanView();
+  },
+  'plan-week-next': () => {
+    const ws = state.planWeekStart || (state.currentPlan ? state.currentPlan.week_start : currentWeek()[0]);
+    state.planWeekStart = addDays(ws, 7);
+    state.currentPlan = null;
+    reloadPlanView();
   },
   'plan-toggle-monthly': () => { state.showMonthly = !state.showMonthly; reloadPlanView(); },
   'plan-approve': async () => {
@@ -1135,7 +1161,7 @@ document.addEventListener('change', async (e) => {
   const sw = e.target.closest('[data-change="switch-profile-top"]');
   if (sw && sw.value) {
     await call('set_active_profile', Number(sw.value));
-    state.profiles = []; state.currentPlan = null;
+    state.profiles = []; state.currentPlan = null; state.planWeekStart = null;
     if (state.view === 'piano' || state.view === 'costi') setView(state.view);
     return;
   }

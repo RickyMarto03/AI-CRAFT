@@ -494,7 +494,8 @@ VIEWS.libreria = async () => {
           ${x.original_caption ? `<div class="faint" style="margin-top:2px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">"${esc(x.original_caption)}"</div>` : ''}
         </div>
         <div class="spacer"></div>
-        ${REF_RETRYABLE_STATUSES.includes(x.status) ? `<button class="btn sm" data-action="reference-retry" data-id="${x.id}">Riprova</button>` : ''}
+        ${x.retryable ? `<button class="btn sm" data-action="reference-retry" data-id="${x.id}">Riprova (${x.download_attempts}/${x.max_download_attempts})</button>`
+          : REF_RETRYABLE_STATUSES.includes(x.status) ? `<span class="faint">Non disponibile · limite tentativi raggiunto</span>` : ''}
         ${x.has_local_media ? `<button class="btn sm" data-action="reference-open-folder" data-id="${x.id}">Apri cartella</button>` : ''}
       </div>`).join('')
     : '<div class="empty">Nessuna reference con questo filtro.</div>';
@@ -515,7 +516,7 @@ VIEWS.libreria = async () => {
     : '<div class="empty">Nessun contenuto generato ancora — vai in Produzione.</div>';
 
   const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>
-    ${r.error ? `<button class="btn danger" data-action="reference-retry-all">Riprova tutti (${r.error})</button>` : ''}`;
+    ${r.error_retryable ? `<button class="btn danger" data-action="reference-retry-all">Riprova tutti (${r.error_retryable})</button>` : ''}`;
   return head('Libreria', 'Magazzino operativo delle reference e dei contenuti generati', actions) +
     chipStrip([
       { label: 'Pronte', value: r.ready, color: '#8fe23a' },

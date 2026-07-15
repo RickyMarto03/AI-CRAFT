@@ -40,8 +40,16 @@ def _run_additive_migrations() -> None:
                 "original_caption": "TEXT",
                 "downloaded_at": "DATETIME",
                 "transcript_segments": "TEXT",
+                "download_attempts": "INTEGER",
             },
         )
+        # Backfill: le righe esistenti prendono NULL da ALTER TABLE ADD
+        # COLUMN (SQLite non applica un default a colonne gia' popolate).
+        # 0 = "nessun tentativo ancora contato con la nuova logica", coerente
+        # col default Python per le righe nuove. Idempotente: dopo il primo
+        # giro non ci sono piu' righe NULL da aggiornare.
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE reference_items SET download_attempts = 0 WHERE download_attempts IS NULL"))
     if "content_pieces" in inspector.get_table_names():
         _add_missing_columns(
             "content_pieces",

@@ -75,6 +75,39 @@ def test_status_for_processing_error_distingue_casi_utili():
     assert sync._status_for_processing_error(RuntimeError("timeout")) == "download_error"
 
 
+def test_is_retryable_rispetta_stato_e_tetto_tentativi():
+    ok = ReferenceItem(status="download_error", download_attempts=1)
+    esaurito = ReferenceItem(status="unavailable", download_attempts=sync.MAX_DOWNLOAD_ATTEMPTS)
+    mai_provato = ReferenceItem(status="pending", download_attempts=0)
+    non_fallito = ReferenceItem(status="ready", download_attempts=0)
+
+    assert sync._is_retryable(ok) is True
+    assert sync._is_retryable(esaurito) is False
+    assert sync._is_retryable(mai_provato) is True
+    assert sync._is_retryable(non_fallito) is False
+
+
+def test_process_item_incrementa_tentativi_e_segna_unavailable_dopo_il_tetto(db_session, monkeypatch):
+    def fake_download(*args, **kwargs):
+        raise RuntimeError("timeout di rete")
+
+    monkeypatch.setattr(sync.downloader, "download_reference", fake_download)
+
+    item = ReferenceItem(source_url="https://www.instagram.com/p/CAP/", status="pending")
+    db_session.add(item)
+    db_session.commit()
+
+    sync.process_item(db_session, item)
+    assert item.download_attempts == 1
+    assert item.status == "download_error"  # sotto il tetto: stato granulare normale
+
+    sync.process_item(db_session, item)
+    assert item.download_attempts == sync.MAX_DOWNLOAD_ATTEMPTS
+    assert item.status == "unavailable"
+    assert "2 tentativi" in item.error_message
+    assert sync._is_retryable(item) is False
+
+
 def test_retryable_statuses_copre_tutti_gli_stati_di_errore_granulari():
     """Regressione (15/07/2026): run_once() aveva una RETRYABLE_STATUSES piu'
     corta di run_policy_once(), quindi un item fallito con uno stato granulare
@@ -153,7 +186,7 @@ def test_retry_reference_carica_item_e_chiama_process_item(monkeypatch, tmp_path
     result = sync.retry_reference(item_id)
 
     assert seen["called_with_id"] == item_id
-    assert result == {"id": item_id, "status": "ready", "error_message": None}
+    assert result == {"id": item_id, "status": "ready", "error_message": None, "skipped": False}
 
 
 def test_retry_reference_id_inesistente_solleva_errore(monkeypatch, tmp_path):
@@ -237,3 +270,67 @@ def test_retry_stale_errors_ritenta_solo_i_falliti_vecchi(monkeypatch, tmp_path)
     assert seen_ids == [vecchio_id]
     assert result["total"] == 1
     assert result["older_than_days"] == 3
+
+
+def test_retry_reference_non_ritenta_reference_con_tentativi_esauriti(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry6.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    with TestSession() as session:
+        item = ReferenceItem(
+            source_url="https://www.instagram.com/p/EXHAUSTED/",
+            status="unavailable",
+            download_attempts=sync.MAX_DOWNLOAD_ATTEMPTS,
+        )
+        session.add(item)
+        session.commit()
+        item_id = item.id
+
+    called = {"n": 0}
+
+    def fake_process_item(session, item, **kw):
+        called["n"] += 1
+
+    monkeypatch.setattr(sync, "process_item", fake_process_item)
+
+    result = sync.retry_reference(item_id)
+
+    assert called["n"] == 0  # non deve consumare un altro tentativo reale
+    assert result == {"id": item_id, "status": "unavailable", "error_message": None, "skipped": True}
+
+
+def test_retry_stale_errors_esclude_reference_con_tentativi_esauriti(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry7.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    now = dt.datetime.utcnow()
+    with TestSession() as session:
+        ritentabile = ReferenceItem(source_url="https://www.instagram.com/p/RT/", status="download_error", download_attempts=1)
+        esaurita = ReferenceItem(source_url="https://www.instagram.com/p/EX/", status="unavailable", download_attempts=sync.MAX_DOWNLOAD_ATTEMPTS)
+        session.add_all([ritentabile, esaurita])
+        session.commit()
+        ritentabile.error_message = "x"
+        esaurita.error_message = "x"
+        session.commit()
+        id_ritentabile, id_esaurita = ritentabile.id, esaurita.id
+
+    with TestSession() as session:
+        session.query(ReferenceItem).filter(ReferenceItem.id.in_([id_ritentabile, id_esaurita])).update(
+            {"updated_at": now - dt.timedelta(days=10)}, synchronize_session=False
+        )
+        session.commit()
+
+    seen_ids = []
+
+    def fake_retry_reference(reference_id):
+        seen_ids.append(reference_id)
+        return {"id": reference_id, "status": "ready", "error_message": None, "skipped": False}
+
+    monkeypatch.setattr(sync, "retry_reference", fake_retry_reference)
+
+    result = sync.retry_stale_errors(older_than_days=3)
+
+    assert seen_ids == [id_ritentabile]
+    assert result["total"] == 1

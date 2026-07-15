@@ -83,6 +83,17 @@ class ReferenceItem(Base):
 
     error_message: Mapped[Optional[str]]
 
+    # Numero di tentativi di download reali (via process_item) consumati da
+    # questa reference, incluso il primo. Non nel blueprint originale:
+    # aggiunto il 15/07/2026 su richiesta dell'utente per smettere di
+    # riprovare all'infinito un contenuto non piu' disponibile su Instagram
+    # — dopo MAX_DOWNLOAD_ATTEMPTS (sync.py) tentativi falliti lo stato
+    # passa a "unavailable" in modo definitivo e la reference esce dalle
+    # liste di retry, sia automatico (sync/scheduler) che manuale
+    # (bottone Riprova). Puo' essere None per reference scaricate prima di
+    # questa modifica: la migrazione additiva in db/base.py lo backfilla a 0.
+    download_attempts: Mapped[Optional[int]] = mapped_column(default=0)
+
     imported_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(
         default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow

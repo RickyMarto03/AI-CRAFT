@@ -174,6 +174,9 @@ def _list_references(session, *, status=None, category=None, search=None, limit=
             "has_local_media": bool(r.local_video_path or r.frame_paths),
             "thumbnail_url": f"file://{thumb}" if thumb else None,
             "error_message": r.error_message,
+            "download_attempts": r.download_attempts or 0,
+            "max_download_attempts": reference_sync.MAX_DOWNLOAD_ATTEMPTS,
+            "retryable": r.status in _ERROR_STATUSES and (r.download_attempts or 0) < reference_sync.MAX_DOWNLOAD_ATTEMPTS,
         })
     return {"items": items, "total": total, "offset": offset, "limit": limit}
 
@@ -331,6 +334,10 @@ def _reference_stats(session) -> dict:
         reverse=True,
     )[:10]
     error_total = sum(by_status.get(s, 0) for s in _ERROR_STATUSES)
+    error_retryable = sum(
+        1 for r in rows
+        if r.status in _ERROR_STATUSES and (r.download_attempts or 0) < reference_sync.MAX_DOWNLOAD_ATTEMPTS
+    )
     return {
         "total": len(rows),
         "by_status": by_status,
@@ -339,6 +346,7 @@ def _reference_stats(session) -> dict:
         "ready": by_status.get("ready", 0),
         "pending": by_status.get("pending", 0),
         "error": error_total,
+        "error_retryable": error_retryable,
         "too_old": too_old,
         "retention_days": config.REFERENCE_RETENTION_DAYS,
         "selection_weeks": config.REFERENCE_SELECTION_WEEKS,
@@ -523,7 +531,12 @@ class Api:
         # esattamente le reference che in Libreria mostrano gia' il bottone
         # "Riprova" singolo (falliti), non anche i "pending"/"downloading"
         # ancora mai processati — quelli li gestisce il sync normale.
-        q = session.query(ReferenceItem).filter(ReferenceItem.status.in_(_ERROR_STATUSES))
+        # Esclude anche chi ha gia' esaurito MAX_DOWNLOAD_ATTEMPTS (stessa
+        # regola del bottone singolo, vedi "retryable" in _list_references).
+        q = session.query(ReferenceItem).filter(
+            ReferenceItem.status.in_(_ERROR_STATUSES),
+            ReferenceItem.download_attempts < reference_sync.MAX_DOWNLOAD_ATTEMPTS,
+        )
         if category:
             q = q.filter(ReferenceItem.source_category == category)
         ids = [r.id for r in q.all()]

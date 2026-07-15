@@ -306,6 +306,9 @@ def test_reference_stats_mostra_settimane_categorie_e_latest(api):
             original_caption="ciao",
             downloaded_at=dt.datetime(2026, 7, 15, 12, 0),
         ))
+        vecchia = dt.datetime(2020, 1, 1)
+        session.add(_seed_reference(status="download_error", category="BOOTY", download_attempts=1, downloaded_at=vecchia))
+        session.add(_seed_reference(status="unavailable", category="GENERAL", download_attempts=api_mod.reference_sync.MAX_DOWNLOAD_ATTEMPTS, downloaded_at=vecchia))
         session.commit()
 
     r = api.reference_stats()
@@ -315,6 +318,8 @@ def test_reference_stats_mostra_settimane_categorie_e_latest(api):
     assert r["by_week"]["2026-07-13"] == 1
     assert r["by_category"]["CAROSELLI / BOOBS"] == 1
     assert r["latest"][0]["has_caption"] is True
+    assert r["error"] == 2  # entrambe contano come errore
+    assert r["error_retryable"] == 1  # solo quella che non ha esaurito i tentativi
 
 
 def test_references_sync_endpoint(api, monkeypatch):
@@ -397,7 +402,7 @@ def test_backlog_set_status_e_filtro(api):
     assert len(tutte["notes"]) == 2
 
 
-def _seed_reference(status="ready", category="BOOBS", local_video_path=None, frame_paths=None, downloaded_at=None, original_caption=None, source_url=None):
+def _seed_reference(status="ready", category="BOOBS", local_video_path=None, frame_paths=None, downloaded_at=None, original_caption=None, source_url=None, download_attempts=0):
     return ReferenceItem(
         source_url=source_url or f"https://www.instagram.com/p/{status}-{category}/",
         source_tab="CAROSELLI",
@@ -408,6 +413,7 @@ def _seed_reference(status="ready", category="BOOBS", local_video_path=None, fra
         frame_paths=frame_paths or [],
         downloaded_at=downloaded_at,
         original_caption=original_caption,
+        download_attempts=download_attempts,
     )
 
 
@@ -510,6 +516,44 @@ def test_retry_all_references_seleziona_solo_stati_ritentabili(api, monkeypatch)
     assert r["ok"]
     assert len(seen_ids) == 2
     assert r["retry_all"]["total"] == 2
+
+
+def test_retry_all_references_esclude_reference_con_tentativi_esauriti(api, monkeypatch):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="download_error", category="TALKING", download_attempts=1),
+            _seed_reference(status="unavailable", category="BOOBS", download_attempts=api_mod.reference_sync.MAX_DOWNLOAD_ATTEMPTS),
+        ])
+        session.commit()
+
+    seen_ids = []
+    monkeypatch.setattr(api_mod.reference_sync, "retry_all", lambda ids: (seen_ids.extend(ids), {"total": len(ids), "ready": 0, "still_failed": 0})[1])
+
+    r = api.retry_all_references()
+
+    assert r["ok"]
+    assert len(seen_ids) == 1  # solo quella che non ha ancora esaurito i tentativi
+
+
+def test_list_references_espone_tentativi_e_retryable(api):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="download_error", category="TALKING", source_url="https://www.instagram.com/p/RETRYABLE/", download_attempts=1),
+            _seed_reference(status="unavailable", category="BOOBS", source_url="https://www.instagram.com/p/EXHAUSTED/", download_attempts=api_mod.reference_sync.MAX_DOWNLOAD_ATTEMPTS),
+        ])
+        session.commit()
+
+    r = api.list_references()
+    by_url = {x["url"]: x for x in r["references"]}
+
+    ritentabile = by_url["https://www.instagram.com/p/RETRYABLE/"]
+    esaurita = by_url["https://www.instagram.com/p/EXHAUSTED/"]
+
+    assert ritentabile["retryable"] is True
+    assert ritentabile["download_attempts"] == 1
+    assert esaurita["retryable"] is False
+    assert esaurita["download_attempts"] == api_mod.reference_sync.MAX_DOWNLOAD_ATTEMPTS
+    assert esaurita["max_download_attempts"] == api_mod.reference_sync.MAX_DOWNLOAD_ATTEMPTS
 
 
 def test_retry_all_references_filtra_per_categoria(api, monkeypatch):

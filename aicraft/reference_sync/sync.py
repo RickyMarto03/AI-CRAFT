@@ -58,6 +58,19 @@ ERROR_STATUSES = (
     "transcription_error",
 )
 
+# Numero massimo di tentativi di download reali (process_item) prima di
+# considerare una reference definitivamente non disponibile. Richiesto
+# dall'utente (15/07/2026): senza un tetto, il sync periodico ritentava
+# all'infinito reference sparite da Instagram ad ogni giro. Una volta
+# raggiunto, process_item forza lo status a "unavailable" e la reference
+# esce da RETRYABLE_STATUSES/ERROR_STATUSES-driven retry (vedi
+# _is_retryable) sia nel sync automatico sia nel retry manuale.
+MAX_DOWNLOAD_ATTEMPTS = 2
+
+
+def _is_retryable(item: ReferenceItem) -> bool:
+    return item.status in RETRYABLE_STATUSES and (item.download_attempts or 0) < MAX_DOWNLOAD_ATTEMPTS
+
 
 @dataclass(frozen=True)
 class SyncPolicyItem:
@@ -170,6 +183,7 @@ def process_item(
     sheet_ref: SheetReference | None = None,
     sheet_client: SheetClient | None = None,
 ) -> None:
+    item.download_attempts = (item.download_attempts or 0) + 1
     try:
         item.status = "downloading"
         session.commit()
@@ -208,8 +222,16 @@ def process_item(
     except Exception as exc:
         logger.exception("Errore durante il processing di %s", item.source_url)
         session.rollback()
-        item.status = _status_for_processing_error(exc, current_status=item.status)
-        item.error_message = str(exc)
+        if item.download_attempts >= MAX_DOWNLOAD_ATTEMPTS:
+            # Tetto raggiunto: non importa piu' la causa specifica
+            # (download_error/private/transcription_error...), la
+            # trattiamo come definitivamente non disponibile e la
+            # togliamo dal giro di retry (vedi _is_retryable).
+            item.status = "unavailable"
+            item.error_message = f"Non disponibile dopo {item.download_attempts} tentativi: {exc}"
+        else:
+            item.status = _status_for_processing_error(exc, current_status=item.status)
+            item.error_message = str(exc)
         session.commit()
 
 
@@ -301,14 +323,20 @@ def retry_reference(reference_id: int) -> dict:
     marca lo Sheet (`process_item` senza sheet_ref/sheet_client si limita a
     non provarci, vedi il guard su GOOGLE_SHEET_MARK_DOWNLOADS). Utile per
     sbloccare un item fallito (download_error/private/unavailable/
-    transcription_error) senza aspettare il prossimo sync completo."""
+    transcription_error) senza aspettare il prossimo sync completo.
+
+    Se la reference ha gia' esaurito MAX_DOWNLOAD_ATTEMPTS, non ritenta
+    (no-op, `skipped: True` nel risultato): rispetta la stessa regola del
+    retry automatico invece di lasciare un modo per aggirarla dalla UI."""
     init_db()
     with SessionLocal() as session:
         item = session.get(ReferenceItem, reference_id)
         if item is None:
             raise ValueError(f"ReferenceItem {reference_id} inesistente")
+        if not _is_retryable(item):
+            return {"id": item.id, "status": item.status, "error_message": item.error_message, "skipped": True}
         process_item(session, item)
-        return {"id": item.id, "status": item.status, "error_message": item.error_message}
+        return {"id": item.id, "status": item.status, "error_message": item.error_message, "skipped": False}
 
 
 def retry_all(reference_ids: list) -> dict:
@@ -338,7 +366,8 @@ def retry_stale_errors(*, older_than_days: int = 3) -> dict:
     bloccato finche' l'operatore non lo nota a mano in Libreria. Le
     reference fallite di recente (entro la finestra) NON vengono
     ritoccate, per non insistere a raffica sulla stessa reference appena
-    fallita."""
+    fallita. Esclude le reference che hanno gia' esaurito
+    MAX_DOWNLOAD_ATTEMPTS (marcate "unavailable" in modo definitivo)."""
     init_db()
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=older_than_days)
     with SessionLocal() as session:
@@ -346,6 +375,7 @@ def retry_stale_errors(*, older_than_days: int = 3) -> dict:
             select(ReferenceItem.id).where(
                 ReferenceItem.status.in_(ERROR_STATUSES),
                 ReferenceItem.updated_at <= cutoff,
+                ReferenceItem.download_attempts < MAX_DOWNLOAD_ATTEMPTS,
             )
         ))
     result = retry_all(ids)
@@ -388,7 +418,7 @@ def run_once(
             logger.info("Eliminate %d reference IG oltre retention (%d giorni)", cleanup_count, config.REFERENCE_RETENTION_DAYS)
             session.commit()
 
-        pending_pairs = [(item, ref) for item, ref in pairs if item.status in RETRYABLE_STATUSES]
+        pending_pairs = [(item, ref) for item, ref in pairs if _is_retryable(item)]
         total_pending = len(pending_pairs)
         if max_items and max_items > 0:
             pending_pairs = pending_pairs[:max_items]
@@ -438,7 +468,7 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None, retry
                 (item, ref) for item, ref in pairs
                 if ref.source_tab.upper() == item_policy.source_tab
                 and ref.source_category.upper() == item_policy.source_category
-                and item.status in RETRYABLE_STATUSES
+                and _is_retryable(item)
             ][:item_policy.limit]
             for item, ref in candidates:
                 process_item(session, item, sheet_ref=ref, sheet_client=client)

@@ -30,7 +30,8 @@ dover rileggere un'intera chat che non ha mai visto.
 **Fatto**: i 4 blocchi di arricchimento (§18-§21), sync massivo ultime 2 settimane reali (255
 link, 170 pronte), redesign Libreria con thumbnail reali + sezione "Contenuti generati" (§22),
 riprova tutti/andamento leggibile/fix scroll (§23), ricerca+paginazione Libreria, retry
-automatico stale, prompt Claude in inglese, regola confine filesystem (§24).
+automatico stale, prompt Claude in inglese, regola confine filesystem (§24), tetto di 2 tentativi
+di download prima di "non disponibile" definitivo (§25).
 
 **L'utente ha confermato che il workflow di generazione per caroselli e video talking è
 "perfetto"** (visto sui 2 output reali del test §17) — non serve piu' lavorarci sopra a meno di
@@ -87,6 +88,29 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 notte, parte 4 (sessione Claude — tetto tentativi download)
+
+- Prima di questa modifica il sync ritentava all'infinito una reference sparita da Instagram
+  (nessun limite in `RETRYABLE_STATUSES`). Aggiunto `ReferenceItem.download_attempts` (migrazione
+  additiva con backfill) e `MAX_DOWNLOAD_ATTEMPTS = 2` in `sync.py`: al secondo fallimento lo
+  stato passa a `"unavailable"` in modo definitivo e la reference esce da tutte le vie di retry
+  (sync periodico, retry singolo, retry-tutti, retry automatico stale) — non solo dal bottone
+  singolo. `retry_reference` rifiuta esplicitamente (no-op) se richiamato su una gia' esaurita.
+- UI Libreria: bottone "Riprova (N/2)" con conteggio, sparisce a esaurimento sostituito da "Non
+  disponibile · limite tentativi raggiunto"; "Riprova tutti" ora conta solo le reference ancora
+  ritentabili (nuovo `error_retryable` in `reference_stats`).
+- 201 test verdi. Vedi doc §25.
+- L'utente ha lasciato fuori dal progetto (volutamente, per ora) la cartella
+  `~/Desktop/REVISIONE_TEST_talking_balletti_15-07-2026/` — la eliminera' lui stesso quando non
+  gli servira' piu', non serve intervenire.
+- **Confermato dall'utente**: la produzione su scala reale con le 170 reference pronte resta
+  rimandata a quando avra' finito completamente il progetto — non proporla piu' come prossimo
+  passo imminente finche' non lo chiede lui.
+- Su richiesta esplicita, fornita anche una lista di 20+ idee di miglioramento aggiuntive
+  (ricerca globale, dashboard "salute pipeline", dry-run costo piano, versioning prompt/character,
+  export CSV, undo cancellazioni, notifiche desktop, ecc.) — nessuna implementata, solo proposta
+  per una eventuale prossima sessione, l'utente decide quali (se quali) portare avanti.
 
 ### 15/07/2026 notte, parte 3 (sessione Claude — ricerca/paginazione Libreria, retry stale, prompt in inglese, confine filesystem)
 

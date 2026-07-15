@@ -852,3 +852,39 @@ backdatando `updated_at` via update SQL diretto perche' `onupdate` non scatta su
 iniziale), `test_claude_creative.py` (asserzioni sui prompt aggiornate ai nuovi testi inglesi:
 `"ONLY as a reference for movement"`, `"No video reference is passed to the model"`,
 `"EXACT TIMESTAMPS"`). 195 test verdi in tutto il progetto.
+
+## 25. Tetto ai tentativi di download (2, poi "non disponibile" definitivo) — FATTO (15/07/2026, sessione Claude)
+
+Prima di questa modifica il sync (sia periodico che il retry manuale) ritentava all'infinito una
+reference sparita da Instagram: `RETRYABLE_STATUSES` includeva tutti gli stati di errore senza
+alcun tetto, quindi ogni sync successivo ci riprovava di nuovo, per sempre.
+
+- **`ReferenceItem.download_attempts`** (nuova colonna, migrazione additiva con backfill a 0 per
+  le righe esistenti — vedi `db/base.py`): incrementata a ogni chiamata reale di `process_item`
+  (sync normale, retry singolo, retry-tutti, retry automatico stale), commitata insieme al primo
+  `status = "downloading"` cosi' resta valida anche se il tentativo poi fallisce e fa rollback.
+- **`MAX_DOWNLOAD_ATTEMPTS = 2`** (`sync.py`): quando un tentativo fallisce e
+  `download_attempts >= MAX_DOWNLOAD_ATTEMPTS`, lo stato viene forzato a `"unavailable"` in modo
+  definitivo (non piu' lo stato granulare specifico dell'errore) e l'`error_message` lo dichiara
+  esplicitamente ("Non disponibile dopo N tentativi: ...").
+- **`_is_retryable(item)`**: unica funzione che decide se un item e' ancora ritentabile
+  (stato in `RETRYABLE_STATUSES` E tentativi sotto il tetto) — usata da `run_once`,
+  `run_policy_once`, `retry_reference`. `retry_all`/`retry_stale_errors`/l'endpoint
+  `retry_all_references` filtrano a monte con la stessa condizione via query SQL
+  (`download_attempts < MAX_DOWNLOAD_ATTEMPTS`), cosi' una reference esaurita esce anche dal
+  bottone "Riprova tutti" e dal retry automatico settimanale, non solo dal retry singolo.
+- **`retry_reference`** ora rifiuta silenziosamente (no-op, `{"skipped": True}`) se chiamata su
+  una reference gia' esaurita — impedisce di aggirare il tetto richiamando l'endpoint singolo
+  dalla UI o da CLI.
+- **UI Libreria**: bottone "Riprova" per riga mostra il conteggio (`Riprova (1/2)`); una volta
+  esaurita, il bottone sparisce e appare "Non disponibile · limite tentativi raggiunto". Il
+  bottone "Riprova tutti" ora conta solo le reference ancora ritentabili (nuovo campo
+  `error_retryable` in `reference_stats`, distinto da `error` che conta tutte le fallite incluse
+  quelle esaurite).
+
+**Test**: `test_reference_sync.py` (`_is_retryable` su stato/tentativi, `process_item` incrementa
+i tentativi e forza `unavailable` al secondo fallimento, `retry_reference` non ritenta una
+reference esaurita, `retry_stale_errors` la esclude dalla query), `test_desktop_api.py`
+(`retry_all_references` esclude le esaurite, `list_references` espone `download_attempts`/
+`max_download_attempts`/`retryable`, `reference_stats` espone `error_retryable`). 201 test verdi
+in tutto il progetto.

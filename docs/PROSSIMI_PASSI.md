@@ -27,44 +27,74 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Non c'e' un prossimo task ovvio senza una decisione dell'utente.** Tutti i punti che avevano
-un'implementazione chiara e non richiedevano spendere crediti veri sono stati fatti (vedi
-checklist sotto: solo i punti 3 e 5 restano aperti). Prima di continuare, CHIEDI all'utente quale
-di questi vuole affrontare, non sceglierlo in autonomia:
-- **Punto 3**: verifiche con job Higgsfield REALI mai fatte (costano crediti veri, l'utente ha
-  sempre voluto autorizzarle esplicitamente una per una, mai in automatico).
-- **Punto 5**: decidere se serve uno stato dedicato su `ContentPiece` per i rifiuti di contenuto
-  di Claude (oggi genericamente "error") — proposto piu' volte, mai confermato in scope.
-- In alternativa: altre rifiniture di qualita' emerse durante l'uso reale (vedi sezione "Da
-  migliorare" dentro l'app).
+**Tutti i 7 punti della vecchia checklist "100% operativo" sono FATTI** (vedi checklist sotto,
+tutti [x]). L'utente ha chiesto esplicitamente il prossimo blocco di lavoro (15/07/2026 sera):
+arricchire l'app con piu' osservabilita' e funzionalita', a partire da:
+1. **Tracking a checkpoint per la produzione** (PRIORITARIO, richiesto esplicitamente): oggi
+   `ContentPiece.status` cambia stadio per stadio ma non lascia una traccia storica con
+   timestamp — non si vede quanto ci ha messo ogni stadio o dove si e' bloccato un pezzo. Serve
+   una tabella di log eventi (piece_id, stadio, timestamp, esito/durata) scritta ad ogni
+   transizione in `engine.process_content_piece`, + vista timeline per pezzo in "Produzione".
+2. Dopo il tracking, arricchire (in quest'ordine di priorita' scelto dall'utente): **Produzione**
+   (timeline/retry singolo pezzo/dettaglio errori — naturale seguito del punto 1), **Piano**
+   (storico versioni, duplicazione settimana precedente, vista mensile), **Creator/Libreria**
+   (statistiche per categoria/performance nel tempo), **Costi** (storico movimenti nel tempo,
+   grafico spesa per tipo, proiezione mensile).
 
 ## Intenzioni discusse in chat, non ancora implementate
 
-(nessuna aperta al momento — l'unica in sospeso, la precisione dell'analisi video talking, e'
-stata implementata il 15/07/2026 sera, vedi log sotto e doc §15.1)
+- **Riconciliazione job dopo un errore `--wait`** (scoperta 15/07/2026 nel primo test reale, vedi
+  doc §17 e backlog app): un 503/timeout durante `--wait` puo' nascondere un job in realta'
+  riuscito e gia' addebitato. Serve controllare `higgsfield generate list` per un job dello stesso
+  tipo appena creato prima di arrendersi. Non implementato, solo annotato.
 
-## Checklist "cosa manca per essere operativo al 100%" (stato 15/07/2026 sera, aggiornata dopo review)
+## Checklist "cosa manca per essere operativo al 100%" (TUTTA FATTA, stato 15/07/2026 sera)
 
 1. [x] Analisi video per i talking/caption (dialogo verbatim, movimenti dai frame, audio,
        densita' frame dinamica, timestamp Whisper per segmento) — vedi doc §12.15 e §15.1.
 2. [x] Caption originale: `downloader.download_reference` salva `original_caption` su
        `ReferenceItem`; lo stadio caption/hashtag ora la adatta invece di inventare da zero
        quando e' disponibile.
-3. [ ] Verifiche con job Higgsfield REALI mai fatte finora (nessuna per limiti di budget/cautela
-       dell'utente su spese non pianificate): `video_references` su seedance_2_0 (toggle
-       `settings.SEEDANCE_USE_VIDEO_REFERENCE`, default OFF), `generate_audio` end-to-end,
-       `image_reference` come URL remoto per `kling3_0_motion_control`, costo reale di
-       `kling3_0_motion_control` (oggi solo il dato ~16cr/10s fornito a voce dall'utente).
+3. [x] **Primo test reale end-to-end fatto** (15/07/2026): 1 talking + 1 balletti, entrambi
+       `delivered`. Costi REALI ora verificati: `kling3_0_motion_control` 18cr/10.6s (non 16 come
+       stimato a voce), `seedance_2_0` 36cr/8.1s. Vedi doc §17 e la cartella
+       `~/Desktop/REVISIONE_TEST_talking_balletti_15-07-2026/` per prompt/output completi.
+       `video_references`/`image_reference` remoto restano da testare (toggle ancora OFF).
 4. [ ] Fedelta posa/outfit alla foto originale nei caroselli — gia' segnata nella sezione "Da
-       migliorare" dell'app, qualita' buona ma migliorabile.
-5. [ ] Stato dedicato su `ContentPiece` per i rifiuti di contenuto di Claude (oggi genericamente
-       "error") — proposto, mai confermato in scope dall'utente.
+       migliorare" dell'app, qualita' buona ma migliorabile. Da rivalutare anche sui 2 nuovi
+       output del punto 3.
+5. [x] Stato dedicato `ContentPiece.status = "content_refused"` per i rifiuti di contenuto di
+       Claude, rilevati euristicamente (`_looks_like_refusal`). Vedi doc §16.
 6. [x] UI produzione reale + Libreria: bottone "Produci davvero" con conferma esplicita e
        guardia budget; "Aggiorna libreria" usa la policy per categoria.
 7. [x] Rifiniture operative UI: agenda del giorno in "Oggi" (§15.2), filtri/retry
        singolo/apertura cartella in Libreria (§15.3).
 
+**Gap reale trovato e corretto durante il punto 3** (non era nella checklist originale): gli asset
+generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in `generated_assets`
+— QA/delivery non avrebbero mai funzionato su un asset vero. Fix: `higgsfield_client.download_result`
++ `engine._localize_asset`. Vedi doc §16.
+
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 sera, parte 2 (sessione Claude — punti 3+5 checklist, primo test reale)
+
+- **Gap reale trovato PRIMA del test**: `generated_assets` teneva solo l'URL Higgsfield remoto,
+  mai scaricato — QA/delivery non avrebbero mai funzionato su un asset vero (mai emerso perche'
+  nessun asset reale era mai arrivato al QA finora). Fix: `higgsfield_client.download_result` +
+  `engine._localize_asset`, chiamati dopo ogni generate_image/generate_video/generate_motion_control.
+- **Stato dedicato `content_refused`**: `ClaudeContentRefusedError` + `_looks_like_refusal`
+  (euristica su frasi di rifiuto), applicato a tutte le funzioni che chiamano Claude per contenuto
+  strutturato. `process_content_piece` lo cattura e marca lo stato invece di "error" generico.
+- **Primo test reale end-to-end**: 1 video talking (8.1s) + 1 video balletti (10.6s), i piu'
+  recenti idonei nello sheet (il talking piu' recente in assoluto, 22.4s, scartato in automatico
+  per soglia 15s). Entrambi `delivered`. Trovato e recuperato un caso reale di job Higgsfield
+  riuscito ma segnalato come errore dal nostro CLI (503 transitorio su `--wait` per seedance_2_0) —
+  recuperato a mano, costo reale registrato. Costi VERIFICATI: kling3_0_motion_control 18cr/10.6s
+  (corretto da 16 stimato), seedance_2_0 36cr/8.1s. Cartella di review completa (prompt/output/
+  reference) in `~/Desktop/REVISIONE_TEST_talking_balletti_15-07-2026/`. Nuova voce di backlog per
+  il gap di riconciliazione `--wait`. 168 test verdi. Vedi doc §16, §17.
+- Prossimo (richiesto dall'utente subito dopo): tracking a checkpoint per la produzione (in corso).
 
 ### 15/07/2026 (sessione Claude — review del lavoro Codex + rifiniture richieste)
 

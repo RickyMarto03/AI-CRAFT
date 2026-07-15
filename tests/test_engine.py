@@ -284,8 +284,8 @@ def test_video_balletti_usa_motion_control_con_video_originale(session, tmp_path
     assert piece.status == "delivered"
     assert calls["video_reference"] == str(original_video)  # il video ORIGINALE, non quello generato
     assert calls["image_reference"] == str(fake_ruby2_image)  # la foto Ruby2 appena generata (locale, non URL remoto)
-    # 0.12 (image_regen, mockato) + 16.0 (video_regen, manual_cost_estimate)
-    assert piece.cost_credits_actual == pytest.approx(16.12)
+    # 0.12 (image_regen, mockato) + 18.0 (video_regen, manual_cost_estimate)
+    assert piece.cost_credits_actual == pytest.approx(18.12)
 
 
 def test_video_balletti_bloccato_nsfw_marca_stato_dedicato(session, tmp_path, monkeypatch):

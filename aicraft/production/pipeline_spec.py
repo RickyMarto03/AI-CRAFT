@@ -85,14 +85,14 @@ GENERATION_OPS: dict = {
         GenerationOp("image_regen", "text2image_soul_v2", _ASPECT_VERTICAL),
         # kling3_0_motion_control: nessun duration/aspect_ratio da passare,
         # auto-derivati dal video_references (verificato con job reale
-        # 8ddb6b61-..., vedi docs §12.2). manual_cost_estimate = ~16
-        # crediti per una clip di ~10s, dato reale fornito dall'utente
-        # (15/07/2026) da uso diretto della piattaforma — non ancora
-        # verificato con un job nostro completato con successo (il test
-        # e' stato bloccato in moderazione prima di generare). Scala
-        # presumibilmente con la durata del video originale: per clip
-        # molto piu' lunghe/corte questo valore va rivisto.
-        GenerationOp("video_regen", "kling3_0_motion_control", {}, manual_cost_estimate=16.0),
+        # 8ddb6b61-..., vedi docs §12.2). manual_cost_estimate = 18 crediti,
+        # VERIFICATO con un job nostro completato con successo il 15/07/2026
+        # (job c7e1b2ad-..., clip di 10.6s, costo reale confermato via
+        # `higgsfield account transactions`, vedi docs §17) — sostituisce il
+        # dato verbale precedente dell'utente (~16cr, vicino ma non esatto).
+        # Scala presumibilmente con la durata del video originale: per clip
+        # molto piu' lunghe/corte questo valore andrebbe rivisto.
+        GenerationOp("video_regen", "kling3_0_motion_control", {}, manual_cost_estimate=18.0),
     ],
     "video_caption": [
         GenerationOp("image_regen", "text2image_soul_v2", _ASPECT_VERTICAL),

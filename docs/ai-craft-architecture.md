@@ -633,3 +633,33 @@ livello di `requests.get`, nuovo test per `content_refused`), `test_claude_creat
 (`_looks_like_refusal`, rifiuto su tutte e 4 le funzioni, verificato che il rifiuto non consuma i
 retry del carosello). 168 test verdi in tutto il progetto. Aggiunto `requests` a
 `requirements.txt` (era una dipendenza transitiva non dichiarata).
+
+## 17. Primo test reale end-to-end: talking + balletti — FATTO (15/07/2026, sessione Claude)
+
+Primo giro di produzione reale completo (non mockato) su un video talking e un video balletti,
+scelti come i più recenti idonei nello sheet (il TALKING più recente in assoluto, 22.4s, è stato
+scartato in automatico perché oltre la soglia di 15s — preso il successivo, 8.1s). Cartella di
+review con sorgenti/reference/prompt/output per entrambi in
+`~/Desktop/REVISIONE_TEST_talking_balletti_15-07-2026/` (fuori dal repo, cartella temporanea
+dell'utente).
+
+**Risultato**: entrambi `delivered`. Balletti riuscito al primo colpo (18.12cr). Talking ha avuto
+un 503 transitorio Higgsfield durante `--wait` sul video — il job era in realtà completato e
+addebitato lato server (verificato con `higgsfield generate get`/`generate list`); recuperato a
+mano (risultato scaricato, pipeline completata, costo reale registrato). Annotato nella sezione
+"Da migliorare" dell'app: serve un meccanismo di riconciliazione (se `--wait` fallisce, controllare
+`generate list` per un job dello stesso tipo appena creato prima di arrendersi).
+
+**Costi reali ora VERIFICATI** (prima erano stime/dati verbali):
+- `kling3_0_motion_control`: **18 crediti** per 10.6s (dato verbale precedente ~16cr, vicino ma
+  non esatto — corretto in `pipeline_spec.py`).
+- `seedance_2_0`: **36 crediti** per 8.1s a 9:16/720p/audio (~4.4cr/s, coerente con il precedente
+  22.5cr/5s ≈ 4.5cr/s — il prezzo scala linearmente con la durata, come atteso).
+
+**Qualità osservata** (per la prossima sessione di rifinitura prompt, non affrontata ora):
+prompt immagine e video entrambi densi e specifici (colori/pose/movimenti puntuali, non generici).
+Il video talking ha riprodotto correttamente il dialogo con timestamp; il balletti ha copiato il
+movimento dal video sorgente via `video_references` di `kling3_0_motion_control` (non c'entra il
+toggle `SEEDANCE_USE_VIDEO_REFERENCE`, che riguarda solo `seedance_2_0`). Fedeltà visiva
+foto-vs-originale non ancora rivalutata a occhio dall'utente su questi due nuovi output — da fare
+consultando la cartella di review.

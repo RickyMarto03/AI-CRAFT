@@ -49,6 +49,14 @@ def _run_additive_migrations() -> None:
                 "requested_source_category": "VARCHAR",
             },
         )
+    if "plan_weeks" in inspector.get_table_names():
+        _add_missing_columns(
+            "plan_weeks",
+            {
+                "created_at": "DATETIME",
+                "updated_at": "DATETIME",
+            },
+        )
 
 
 def _add_missing_columns(table_name: str, columns: dict[str, str]) -> None:

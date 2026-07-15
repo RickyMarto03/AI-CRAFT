@@ -1,7 +1,7 @@
 'use strict';
 
 /* ============ Bridge & stato ============ */
-const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' }, expandedPieceId: null };
+const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' }, expandedPieceId: null, showMonthly: false };
 
 async function call(method, ...args) {
   try {
@@ -284,18 +284,56 @@ VIEWS.piano = async () => {
     </div>`;
   }).join('');
 
-  const actions = `<div class="row">
+  const actions = `<div class="row wrap">
     <span class="badge gray">v${pl.version}</span>${statusBadge}
     <span class="badge ${pl.missing_references ? 'amber' : 'green'}">${pl.assigned_references}/${pl.total} ref</span>
     <button class="btn sm blue" data-action="plan-assign-refs">Assegna reference</button>
+    <button class="btn sm" data-action="plan-duplicate" data-profile="${active.id}">Duplica come prossima settimana</button>
+    <button class="btn sm" data-action="plan-toggle-monthly">Vista mensile</button>
     <button class="btn danger sm" data-action="plan-reset">Azzera</button>
     <button class="btn primary" data-action="plan-approve">Approva piano →</button></div>`;
 
+  const updatedNote = pl.updated_at
+    ? `<div class="faint" style="margin:-10px 0 16px">Ultima modifica: ${esc(pl.updated_at.replace('T', ' ').slice(0, 19))}</div>` : '';
+
+  let monthlyHtml = '';
+  if (state.showMonthly) {
+    const [year, month] = pl.week_start.split('-').map(Number);
+    const m = await call('monthly_summary', active.id, year, month);
+    monthlyHtml = m.ok ? monthlySummarySection(m) : `<div class="empty">${esc(m.error)}</div>`;
+  }
+
   return head('Piano', 'Calendario editoriale · ' + prettyDate(pl.week_start) + ' → ' + prettyDate(pl.week_end), actions) +
+    updatedNote +
     chipStrip(cts.map((ct) => ({ label: CT_LABELS[ct], value: pl.totals_by_type[ct], color: CT_COLORS[ct] }))
       .concat([{ label: 'Totale', value: pl.total, color: '#4c8bf5' }])) +
-    `<div class="week-strip">${cards}</div>`;
+    `<div class="week-strip">${cards}</div>` +
+    monthlyHtml;
 };
+
+function monthlySummarySection(m) {
+  const MONTH_NAMES = ['', 'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
+  const weekRows = m.weeks.length
+    ? m.weeks.map((w) => `<div class="row" style="padding:5px 0">
+        <span class="muted" style="flex:1">${prettyDate(w.week_start)} → ${prettyDate(w.week_end)}</span>
+        <span class="badge ${w.status === 'approvato' ? 'green' : 'amber'}">${w.status}</span>
+        <span class="num" style="margin-left:10px">${w.total}</span>
+      </div>`).join('')
+    : '<div class="empty">Nessun piano in questo mese.</div>';
+  const byTypeRows = Object.keys(m.totals_by_type).length
+    ? Object.entries(m.totals_by_type).map(([ct, n]) => `<div class="row" style="padding:5px 0">
+        <span class="dc-dot" style="background:${CT_COLORS[ct] || '#4c8bf5'};width:8px;height:8px;border-radius:50%"></span>
+        <span class="muted" style="flex:1;margin-left:8px">${CT_LABELS[ct] || esc(ct)}</span>
+        <span class="num">${n}</span>
+      </div>`).join('')
+    : '<div class="faint">nessun contenuto</div>';
+  return `
+    <div class="section-title">Riepilogo mensile — ${MONTH_NAMES[m.month]} ${m.year} (${m.total_pieces} contenuti)</div>
+    <div class="grid cols-2">
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per settimana</div>${weekRows}</div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per tipo</div>${byTypeRows}</div>
+    </div>`;
+}
 
 /* ============ Vista: Produzione ============ */
 function timelineRows(events) {
@@ -572,6 +610,16 @@ const ACTIONS = {
         if (pl.grid[ct][d] > 0) await call('plan_set_cell', pl.id, ct, d, 0);
     toast('Piano azzerato'); state.currentPlan = null; reloadPlanView();
   },
+  'plan-duplicate': async () => {
+    if (!state.currentPlan) return;
+    const pl = state.currentPlan;
+    const newWs = addDays(pl.week_end, 1);
+    const newWe = addDays(newWs, 6);
+    const r = await call('duplicate_plan', pl.id, newWs, newWe);
+    if (r.ok) { toast('Piano duplicato su ' + prettyDate(newWs) + ' → ' + prettyDate(newWe)); state.currentPlan = null; reloadPlanView(); }
+    else toast(r.error, 'err');
+  },
+  'plan-toggle-monthly': () => { state.showMonthly = !state.showMonthly; reloadPlanView(); },
   'plan-approve': async () => {
     if (!state.currentPlan) return;
     const r = await call('approve_plan', state.currentPlan.id);

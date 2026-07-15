@@ -27,19 +27,16 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Tracking a checkpoint FATTO** (15/07/2026 sera, vedi doc §18): tabella `ContentPieceEvent`,
-endpoint `list_content_pieces`/`piece_timeline`, sezione "Pezzi recenti" con timeline espandibile
-in Produzione.
+**Tracking a checkpoint FATTO** (vedi doc §18). **Piano arricchito FATTO** (vedi doc §19):
+duplicazione settimana, storico versione con timestamp, vista mensile.
 
 **Prossimo, nell'ordine di priorita' scelto dall'utente** (non ancora iniziato):
-1. **Produzione**: retry singolo pezzo fallito direttamente dalla UI (oggi solo `references
-   sync`/`retry_reference` per le reference, non c'e' un "riprova questo pezzo" per un
-   ContentPiece in errore), dettaglio errori piu' ricco (gia' visibile in parte nella timeline).
-2. **Piano**: storico versioni piano, duplicazione settimana precedente, vista mensile oltre alla
-   settimanale.
-3. **Creator/Libreria**: statistiche per categoria/performance reference nel tempo.
-4. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
+1. **Creator/Libreria**: statistiche per categoria/performance reference nel tempo.
+2. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
    proiezione consumo mensile.
+3. **Produzione — retry singolo pezzo** (rimasto indietro, minore priorita'): oggi non c'e' un
+   "riprova questo pezzo" per un ContentPiece finito in `error` dalla UI — bisogna rilanciare
+   l'intero piano.
 
 ## Intenzioni discusse in chat, non ancora implementate
 
@@ -76,6 +73,18 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 sera, parte 4 (sessione Claude — Piano arricchito)
+
+- `PlanWeek.created_at`/`updated_at` (migrazione additiva), `updated_at` gia' auto-aggiornato da
+  `onupdate` quando `_touch()` cambia versione/stato — nessuna logica nuova, solo la colonna.
+- `planning.duplicate_plan_week`: copia la griglia (content_type x giorno) su una nuova settimana
+  per lo stesso profilo, riusando `set_cell_count`. Non copia reference/stato/costi. Endpoint
+  `duplicate_plan`, bottone "Duplica come prossima settimana" (calcola la settimana dopo da solo).
+- `monthly_summary(profile_id, year, month)`: aggrega tutte le settimane che intersecano il mese
+  (per settimana e per content_type). UI: sezione "Riepilogo mensile" toggle in Piano.
+- 176 test verdi. Vedi doc §19.
+- Prossimo (ordine scelto dall'utente): Creator/Libreria, poi Costi.
 
 ### 15/07/2026 sera, parte 3 (sessione Claude — tracking a checkpoint)
 

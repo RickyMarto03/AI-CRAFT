@@ -692,3 +692,29 @@ completa di eventi (started/completed per ogni stadio) e le durate valorizzate; 
 percorso `too_long` per verificare che un fallimento produca `started`+`failed` (non `completed`)
 con `detail` popolato. `test_desktop_api.py`: filtri di `list_content_pieces`, ordine cronologico
 di `piece_timeline`, id inesistente. 171 test verdi in tutto il progetto.
+
+## 19. Arricchimento Piano: duplicazione, storico versione, vista mensile — FATTO (15/07/2026, sessione Claude)
+
+Primo dei 4 blocchi di arricchimento richiesti dall'utente dopo il tracking a checkpoint
+(priorità: Produzione → Piano → Creator/Libreria → Costi).
+
+- **`created_at`/`updated_at` su `PlanWeek`** (migrazione additiva, colonne nullable per le righe
+  già esistenti nel DB reale). `updated_at` si aggiorna da solo (`onupdate`) ogni volta che
+  `_touch()` cambia `version`/`status` — nessun codice nuovo oltre alla colonna. UI: mostrato sotto
+  l'header del Piano ("Ultima modifica: ..."), oltre al numero di versione già esistente.
+- **`planning.duplicate_plan_week(source_plan, week_start, week_end)`**: copia la GRIGLIA
+  (content_type × giorno → conteggio) di un piano su una nuova settimana per lo stesso profilo,
+  riusando `set_cell_count` (stessa funzione dietro gli stepper +/-, nessuna logica duplicata). Non
+  copia `reference_id` (la nuova settimana pesca reference fresche quando viene approvata) né
+  stato/costi — il piano nuovo nasce sempre in bozza, come uno creato da zero. Endpoint
+  `duplicate_plan`, bottone "Duplica come prossima settimana" (calcola automaticamente la
+  settimana successiva da `week_end` del piano corrente).
+- **Vista mensile**: endpoint `monthly_summary(profile_id, year, month)` aggrega tutti i `PlanWeek`
+  del profilo la cui settimana interseca il mese richiesto (non solo quelle che iniziano nel mese,
+  per non perdere settimane a cavallo) — totali per settimana e per content_type. UI: sezione
+  "Riepilogo mensile" attivabile con un bottone toggle sotto il calendario settimanale, mese
+  dedotto dalla settimana del piano corrente.
+
+**Test**: `test_planning.py` (`duplicate_plan_week` copia la griglia correttamente, gestisce un
+piano vuoto senza esplodere), `test_desktop_api.py` (`duplicate_plan` endpoint, piano inesistente,
+`monthly_summary` aggrega solo le settimane del mese giusto). 176 test verdi.

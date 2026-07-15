@@ -120,3 +120,40 @@ def test_modifica_a_piano_approvato_lo_riporta_in_bozza(db_session, profile):
     # aggiungere un pezzo dopo l'approvazione richiede nuova approvazione
     planning.add_content_piece(db_session, plan, content_type="video_talking", scheduled_day="mar")
     assert plan.status == "bozza"
+
+
+# --- duplicazione settimana ---
+
+def test_duplicate_plan_week_copia_la_griglia(db_session, profile):
+    source = _new_plan(db_session, profile)
+    planning.add_content_piece(db_session, source, content_type="carosello", scheduled_day="lun")
+    planning.add_content_piece(db_session, source, content_type="carosello", scheduled_day="lun")
+    planning.add_content_piece(db_session, source, content_type="video_talking", scheduled_day="mer")
+    db_session.commit()
+
+    new_plan = planning.duplicate_plan_week(
+        db_session, source, week_start=dt.date(2026, 7, 27), week_end=dt.date(2026, 8, 2)
+    )
+    db_session.commit()
+
+    assert new_plan.id != source.id
+    assert new_plan.status == "bozza"
+    assert new_plan.week_start == dt.date(2026, 7, 27)
+
+    pieces = [(p.content_type, p.scheduled_day) for p in new_plan.content_pieces]
+    assert sorted(pieces) == sorted([
+        ("carosello", "lun"), ("carosello", "lun"), ("video_talking", "mer"),
+    ])
+    # i pezzi duplicati non hanno reference assegnata: la nuova settimana la pesca fresca
+    assert all(p.reference_id is None for p in new_plan.content_pieces)
+
+
+def test_duplicate_plan_week_piano_vuoto_non_esplode(db_session, profile):
+    source = _new_plan(db_session, profile)
+    db_session.commit()
+
+    new_plan = planning.duplicate_plan_week(
+        db_session, source, week_start=dt.date(2026, 7, 27), week_end=dt.date(2026, 8, 2)
+    )
+
+    assert new_plan.content_pieces == []

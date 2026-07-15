@@ -159,6 +159,15 @@ class PlanWeek(Base):
     status: Mapped[str] = mapped_column(default="bozza")  # "bozza" | "approvato"
     version: Mapped[int] = mapped_column(default=1)
 
+    # Non nel blueprint originale: aggiunti il 15/07/2026 per mostrare
+    # "quando" un piano e' stato creato/modificato l'ultima volta (storico
+    # versioni leggero), non solo il numero di versione. Vedi
+    # docs/ai-craft-architecture.md §19.
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
+    )
+
     profile: Mapped["Profile"] = relationship(back_populates="plan_weeks")
     content_pieces: Mapped[list["ContentPiece"]] = relationship(back_populates="plan_week")
 

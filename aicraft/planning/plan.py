@@ -158,3 +158,25 @@ def approve_plan(session: Session, plan: PlanWeek, *, cost_fn=budget_estimate.de
     plan.version += 1
     session.flush()
     return estimated
+
+
+def duplicate_plan_week(session: Session, source_plan: PlanWeek, *, week_start: dt.date, week_end: dt.date) -> PlanWeek:
+    """Duplica la griglia (content_type x giorno) di un piano su una nuova
+    settimana per lo stesso profilo — richiesto dall'utente per non
+    ridigitare a mano una settimana simile alla precedente. Copia solo i
+    CONTEGGI, non le reference assegnate (la nuova settimana pesca reference
+    fresche dalla Libreria quando viene approvata) ne' stato/costi. Il nuovo
+    piano nasce sempre in bozza, come uno creato da zero."""
+    new_plan = create_plan_week(session, profile_id=source_plan.profile_id, week_start=week_start, week_end=week_end)
+
+    counts: dict = {}
+    for piece in _pezzi_del_piano(session, source_plan):
+        if piece.scheduled_day is None:
+            continue
+        key = (piece.content_type, piece.scheduled_day)
+        counts[key] = counts.get(key, 0) + 1
+
+    for (content_type, giorno), n in counts.items():
+        set_cell_count(session, new_plan, content_type=content_type, scheduled_day=giorno, target=n)
+
+    return new_plan

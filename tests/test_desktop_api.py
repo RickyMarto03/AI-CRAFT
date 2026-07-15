@@ -544,3 +544,46 @@ def test_piece_timeline_id_inesistente(api):
     r = api.piece_timeline(999)
     assert r["ok"] is False
     assert "inesistente" in r["error"]
+
+
+def test_duplicate_plan_endpoint_copia_griglia_su_nuova_settimana(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    pl = api.create_plan(1, "2026-07-20", "2026-07-26")
+    plan_id = pl["plan"]["id"]
+    api.plan_set_cell(plan_id, "carosello", "lun", 2)
+
+    r = api.duplicate_plan(plan_id, "2026-07-27", "2026-08-02")
+
+    assert r["ok"]
+    new_plan = r["plan"]
+    assert new_plan["id"] != plan_id
+    assert new_plan["week_start"] == "2026-07-27"
+    assert new_plan["status"] == "bozza"
+    assert new_plan["grid"]["carosello"]["lun"] == 2
+    assert new_plan["assigned_references"] == 0  # nessuna reference copiata
+
+
+def test_duplicate_plan_piano_inesistente(api):
+    r = api.duplicate_plan(999, "2026-07-27", "2026-08-02")
+    assert r["ok"] is False
+    assert "inesistente" in r["error"]
+
+
+def test_monthly_summary_aggrega_le_settimane_del_mese(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    pl1 = api.create_plan(1, "2026-07-06", "2026-07-12")
+    api.plan_set_cell(pl1["plan"]["id"], "carosello", "lun", 2)
+    pl2 = api.create_plan(1, "2026-07-20", "2026-07-26")
+    api.plan_set_cell(pl2["plan"]["id"], "video_talking", "mer", 1)
+    # fuori dal mese di luglio: non deve comparire
+    pl3 = api.create_plan(1, "2026-08-03", "2026-08-09")
+    api.plan_set_cell(pl3["plan"]["id"], "carosello", "lun", 5)
+
+    r = api.monthly_summary(1, 2026, 7)
+
+    assert r["ok"]
+    assert len(r["weeks"]) == 2
+    assert r["total_pieces"] == 3
+    assert r["totals_by_type"] == {"carosello": 2, "video_talking": 1}

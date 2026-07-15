@@ -13,6 +13,7 @@ frontend puo' mostrare messaggi puliti.
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import functools
 import logging
@@ -85,6 +86,8 @@ def _plan_grid(session, plan: PlanWeek) -> dict:
         "total": sum(totals_by_type.values()),
         "assigned_references": assigned,
         "missing_references": max(0, len(pieces) - assigned),
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
     }
 
 
@@ -435,6 +438,56 @@ class Api:
             "assigned": result.assigned,
             "missing": result.missing,
             "by_content_type": result.by_content_type,
+        }
+
+    @_endpoint
+    def duplicate_plan(self, session, plan_id, week_start, week_end):
+        source = session.get(PlanWeek, int(plan_id))
+        if source is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        new_plan = planning.duplicate_plan_week(
+            session, source,
+            week_start=dt.date.fromisoformat(week_start), week_end=dt.date.fromisoformat(week_end),
+        )
+        return {"plan": _plan_grid(session, new_plan)}
+
+    @_endpoint
+    def monthly_summary(self, session, profile_id, year, month):
+        profile_id, year, month = int(profile_id), int(year), int(month)
+        month_start = dt.date(year, month, 1)
+        month_end = dt.date(year, month, calendar.monthrange(year, month)[1])
+        plans = (
+            session.query(PlanWeek)
+            .filter(
+                PlanWeek.profile_id == profile_id,
+                PlanWeek.week_start <= month_end,
+                PlanWeek.week_end >= month_start,
+            )
+            .order_by(PlanWeek.week_start)
+            .all()
+        )
+        weeks = []
+        totals_by_type: dict = {}
+        total_pieces = 0
+        for plan in plans:
+            pieces = session.query(ContentPiece).filter(ContentPiece.plan_week_id == plan.id).all()
+            by_type: dict = {}
+            for p in pieces:
+                by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
+                totals_by_type[p.content_type] = totals_by_type.get(p.content_type, 0) + 1
+            total_pieces += len(pieces)
+            weeks.append({
+                "id": plan.id,
+                "week_start": plan.week_start.isoformat(),
+                "week_end": plan.week_end.isoformat(),
+                "status": plan.status,
+                "version": plan.version,
+                "total": len(pieces),
+                "by_type": by_type,
+            })
+        return {
+            "year": year, "month": month,
+            "weeks": weeks, "totals_by_type": totals_by_type, "total_pieces": total_pieces,
         }
 
     # --- produzione (Produzione) ---

@@ -113,6 +113,9 @@ def test_viral_general_tab_data_annegata_nell_header_categoria():
     assert by_category["OTHER CONTENTS"].url == "https://www.instagram.com/reel/OTH1/"
     assert by_category["BALLETTI/LIPSYNC"].url == "https://www.instagram.com/reel/BAL1/"
     assert by_category["TALKING"].url == "https://www.instagram.com/reel/TALK1/"
+    assert by_category["OTHER CONTENTS"].done_ricky_col == 3
+    assert by_category["BALLETTI/LIPSYNC"].done_ricky_col == 8
+    assert by_category["TALKING"].done_ricky_col == 13
 
     # la data, pur annegata in una cella di header categoria, va applicata a tutte le righe dati del blocco
     for r in refs:
@@ -148,3 +151,18 @@ def test_nomi_mese_italiani_riconosciuti_come_quelli_inglesi():
     assert len(refs) == 1
     assert refs[0].week_start == dt.date(2026, 6, 15)
     assert refs[0].week_end == dt.date(2026, 6, 21)
+
+
+def test_caption_e_categoria_video_valida():
+    rows = [
+        ["CAPTION", "", ""],
+        ["20-26 JULY", "DONE NICO", "DONE RICKY"],
+        ["https://www.instagram.com/reel/CAP1/", "", ""],
+    ]
+
+    refs = parse_rows(rows, tab_name="VIRAL GENERAL", year=YEAR)
+
+    assert len(refs) == 1
+    assert refs[0].source_category == "CAPTION"
+    assert refs[0].content_type_hint == "video"
+    assert refs[0].done_ricky_col == 3

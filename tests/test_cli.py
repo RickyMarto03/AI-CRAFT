@@ -51,3 +51,11 @@ def test_cli_profilo_attivo_marcato(cli_env, capsys):
     out = capsys.readouterr().out
     lines = [l for l in out.splitlines() if "Nova" in l]
     assert lines and lines[0].startswith("*")  # profilo attivo marcato con *
+
+
+def test_cli_scheduler_plist(cli_env, capsys):
+    cli.main(["scheduler", "plist", "--weekday", "2", "--hour", "9", "--minute", "15"])
+
+    out = capsys.readouterr().out
+    assert "com.aicraft.weekly-reference-sync" in out
+    assert "sync-policy" in out

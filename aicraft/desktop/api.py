@@ -17,7 +17,7 @@ import datetime as dt
 import functools
 import logging
 
-from .. import backlog, reporting
+from .. import backlog, config, reporting
 from ..budget import estimate as budget_estimate
 from ..budget import ledger as budget_ledger
 from ..budget import sync as budget_sync
@@ -26,8 +26,10 @@ from ..db.base import SessionLocal, init_db
 from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
 from ..planning import plan as planning
 from ..planning.quota import GIORNI_VALIDI
+from ..production import engine as production_engine
 from ..production import pipeline_spec
 from ..profiles import manager as profiles
+from ..reference_sync import allocator, sync as reference_sync
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ def _plan_grid(session, plan: PlanWeek) -> dict:
             grid[p.content_type][p.scheduled_day] += 1
     totals_by_type = {ct: sum(grid[ct].values()) for ct in CONTENT_TYPES}
     totals_by_day = {g: sum(grid[ct][g] for ct in CONTENT_TYPES) for g in GIORNI_VALIDI}
+    assigned = sum(1 for p in pieces if p.reference_id is not None)
     return {
         "id": plan.id,
         "profile_id": plan.profile_id,
@@ -78,6 +81,86 @@ def _plan_grid(session, plan: PlanWeek) -> dict:
         "totals_by_type": totals_by_type,
         "totals_by_day": totals_by_day,
         "total": sum(totals_by_type.values()),
+        "assigned_references": assigned,
+        "missing_references": max(0, len(pieces) - assigned),
+    }
+
+
+def _reference_stats(session) -> dict:
+    rows = session.query(ReferenceItem).all()
+    by_status: dict = {}
+    by_week: dict = {}
+    by_category: dict = {}
+    too_old = 0
+    cutoff = dt.date.today() - dt.timedelta(days=config.REFERENCE_RETENTION_DAYS)
+    for r in rows:
+        by_status[r.status] = by_status.get(r.status, 0) + 1
+        week_key = r.week_start.isoformat() if r.week_start else "senza settimana"
+        by_week[week_key] = by_week.get(week_key, 0) + 1
+        cat_key = f"{r.source_tab or '—'} / {r.source_category or '—'}"
+        by_category[cat_key] = by_category.get(cat_key, 0) + 1
+        if r.week_end and r.week_end < cutoff:
+            too_old += 1
+    latest = sorted(
+        rows,
+        key=lambda r: r.downloaded_at or r.imported_at,
+        reverse=True,
+    )[:10]
+    error_total = sum(by_status.get(s, 0) for s in ("error", "download_error", "private", "unavailable", "transcription_error"))
+    return {
+        "total": len(rows),
+        "by_status": by_status,
+        "by_week": dict(sorted(by_week.items(), reverse=True)),
+        "by_category": dict(sorted(by_category.items())),
+        "ready": by_status.get("ready", 0),
+        "pending": by_status.get("pending", 0),
+        "error": error_total,
+        "too_old": too_old,
+        "retention_days": config.REFERENCE_RETENTION_DAYS,
+        "selection_weeks": config.REFERENCE_SELECTION_WEEKS,
+        "latest": [
+            {
+                "id": r.id,
+                "url": r.source_url,
+                "status": r.status,
+                "week_start": r.week_start.isoformat() if r.week_start else None,
+                "source_tab": r.source_tab,
+                "source_category": r.source_category,
+                "downloaded_at": r.downloaded_at.isoformat() if r.downloaded_at else None,
+                "has_caption": bool(r.original_caption),
+            }
+            for r in latest
+        ],
+    }
+
+
+def _production_preview(session, plan_id=None) -> dict:
+    q = (
+        session.query(ContentPiece)
+        .join(PlanWeek, ContentPiece.plan_week_id == PlanWeek.id)
+        .filter(
+            ContentPiece.status == "reference_ready",
+            ContentPiece.reference_id.isnot(None),
+            PlanWeek.status == "approvato",
+        )
+    )
+    if plan_id is not None:
+        q = q.filter(ContentPiece.plan_week_id == int(plan_id))
+    pieces = q.all()
+    cache: dict = {}
+    stima = 0.0
+    by_type: dict = {}
+    for p in pieces:
+        c = budget_estimate.estimate_content_type(p.content_type, cache=cache)
+        stima += c
+        by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
+    balance = budget_ledger.current_balance(session)
+    return {
+        "ready_count": len(pieces),
+        "by_type": by_type,
+        "estimated_cost": stima,
+        "balance": balance,
+        "covers": balance >= stima,
     }
 
 
@@ -154,17 +237,25 @@ class Api:
 
     @_endpoint
     def reference_stats(self, session):
-        rows = session.query(ReferenceItem).all()
-        by_status: dict = {}
-        for r in rows:
-            by_status[r.status] = by_status.get(r.status, 0) + 1
-        return {
-            "total": len(rows),
-            "by_status": by_status,
-            "ready": by_status.get("ready", 0),
-            "pending": by_status.get("pending", 0),
-            "error": by_status.get("error", 0),
-        }
+        return _reference_stats(session)
+
+    @_endpoint
+    def references_sync(self, session, limit=None, tab=None, category=None):
+        result = reference_sync.run_once(
+            max_items=(int(limit) if limit is not None else None),
+            source_tab=tab,
+            source_category=category,
+        )
+        stats = _reference_stats(session)
+        stats["sync"] = result
+        return stats
+
+    @_endpoint
+    def references_sync_policy(self, session, policy=None):
+        result = reference_sync.run_policy_once(policy=policy)
+        stats = _reference_stats(session)
+        stats["sync"] = result
+        return stats
 
     # --- piano (Piano) ---
 
@@ -211,38 +302,57 @@ class Api:
         if plan is None:
             return {"ok": False, "error": f"Piano {plan_id} inesistente"}
         estimated = planning.approve_plan(session, plan)
-        return {"plan": _plan_grid(session, plan), "estimated": estimated, "balance": budget_ledger.current_balance(session)}
+        assignment = allocator.assign_references_to_plan(session, plan.id)
+        return {
+            "plan": _plan_grid(session, plan),
+            "estimated": estimated,
+            "balance": budget_ledger.current_balance(session),
+            "reference_assignment": {
+                "assigned": assignment.assigned,
+                "missing": assignment.missing,
+                "by_content_type": assignment.by_content_type,
+            },
+        }
 
-    # --- produzione (Produzione) — solo dry-run per sicurezza ---
+    @_endpoint
+    def assign_plan_references(self, session, plan_id):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        result = allocator.assign_references_to_plan(session, plan.id)
+        return {
+            "plan": _plan_grid(session, plan),
+            "assigned": result.assigned,
+            "missing": result.missing,
+            "by_content_type": result.by_content_type,
+        }
+
+    # --- produzione (Produzione) ---
 
     @_endpoint
     def production_preview(self, session, plan_id=None):
         """Anteprima SENZA COSTI di cosa verrebbe prodotto (pezzi pronti di piani
         approvati) e stima crediti. Non genera nulla, non spende (equivalente
         di 'Avvia una prova senza costi' degli screenshot)."""
-        q = (
-            session.query(ContentPiece)
-            .join(PlanWeek, ContentPiece.plan_week_id == PlanWeek.id)
-            .filter(ContentPiece.status == "reference_ready", PlanWeek.status == "approvato")
-        )
+        return _production_preview(session, plan_id=plan_id)
+
+    @_endpoint
+    def production_run(self, session, plan_id=None, confirmation=None):
+        if confirmation != "PRODUCI":
+            return {"ok": False, "error": "Conferma richiesta: scrivi/manda PRODUCI per avviare la produzione reale."}
+        q = session.query(PlanWeek).filter(PlanWeek.status == "approvato")
         if plan_id is not None:
-            q = q.filter(ContentPiece.plan_week_id == int(plan_id))
-        pieces = q.all()
-        cache: dict = {}
-        stima = 0.0
-        by_type: dict = {}
-        for p in pieces:
-            c = budget_estimate.estimate_content_type(p.content_type, cache=cache)
-            stima += c
-            by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
-        balance = budget_ledger.current_balance(session)
-        return {
-            "ready_count": len(pieces),
-            "by_type": by_type,
-            "estimated_cost": stima,
-            "balance": balance,
-            "covers": balance >= stima,
-        }
+            q = q.filter(PlanWeek.id == int(plan_id))
+        for plan in q.all():
+            allocator.assign_references_to_plan(session, plan.id)
+        session.flush()
+        preview = _production_preview(session, plan_id=plan_id)
+        if preview["ready_count"] <= 0:
+            return {"ok": False, "error": "Nessun contenuto pronto da produrre."}
+        if not preview["covers"]:
+            return {"ok": False, "error": "Budget insufficiente per avviare la produzione reale.", **preview}
+        result = production_engine.run_once(session, plan_id=(int(plan_id) if plan_id is not None else None))
+        return {"preview_before": preview, "production": result}
 
     # --- backlog (Da migliorare) ---
 

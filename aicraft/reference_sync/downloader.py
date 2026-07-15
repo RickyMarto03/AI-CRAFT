@@ -39,15 +39,19 @@ class DownloadResult:
     folder: Path
     video_path: Path | None
     image_paths: list[Path]
+    original_caption: str | None = None
 
 
-def _shortcode_from_url(url: str) -> str:
+def shortcode_from_url(url: str) -> str:
     # gestisce query string e img_index: /p/<code>/?img_index=2 -> <code>
     path = urlparse(url).path
     parts = [p for p in path.split("/") if p]
     if len(parts) >= 2 and parts[0] in ("p", "reel", "reels", "tv"):
         return parts[1]
     return parts[-1]
+
+
+_shortcode_from_url = shortcode_from_url
 
 
 def _browser_cookies() -> dict:
@@ -92,14 +96,21 @@ def _get_client():
     return cl
 
 
-def download_reference(url: str, min_delay_seconds: float = _DEFAULT_MIN_DELAY_SECONDS) -> DownloadResult:
+def download_reference(
+    url: str,
+    min_delay_seconds: float = _DEFAULT_MIN_DELAY_SECONDS,
+    folder: Path | None = None,
+) -> DownloadResult:
     cl = _get_client()
-    shortcode = _shortcode_from_url(url)
-    folder = config.MEDIA_DIR / shortcode
+    shortcode = shortcode_from_url(url)
+    folder = folder or (config.MEDIA_DIR / shortcode)
     folder.mkdir(parents=True, exist_ok=True)
 
     pk = cl.media_pk_from_code(shortcode)
     info = cl.media_info(pk)
+    original_caption = getattr(info, "caption_text", None) or getattr(info, "caption", None)
+    if original_caption is not None:
+        original_caption = str(original_caption).strip() or None
 
     video_path: Optional[Path] = None
     image_paths: list = []
@@ -120,4 +131,9 @@ def download_reference(url: str, min_delay_seconds: float = _DEFAULT_MIN_DELAY_S
     # rate-limiting conservativo per non stressare l'account
     time.sleep(min_delay_seconds)
 
-    return DownloadResult(folder=folder, video_path=video_path, image_paths=sorted(image_paths))
+    return DownloadResult(
+        folder=folder,
+        video_path=video_path,
+        image_paths=sorted(image_paths),
+        original_caption=original_caption,
+    )

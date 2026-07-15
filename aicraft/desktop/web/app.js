@@ -230,6 +230,8 @@ VIEWS.piano = async () => {
 
   const actions = `<div class="row">
     <span class="badge gray">v${pl.version}</span>${statusBadge}
+    <span class="badge ${pl.missing_references ? 'amber' : 'green'}">${pl.assigned_references}/${pl.total} ref</span>
+    <button class="btn sm blue" data-action="plan-assign-refs">Assegna reference</button>
     <button class="btn danger sm" data-action="plan-reset">Azzera</button>
     <button class="btn primary" data-action="plan-approve">Approva piano →</button></div>`;
 
@@ -255,7 +257,10 @@ VIEWS.produzione = async () => {
       <div class="hs-kicker">${covers ? 'Situazione' : 'Attenzione'}</div>
       <div class="hs-title">${r.ready_count ? (covers ? 'Produzione pronta' : 'Budget insufficiente') : 'Nessun contenuto in coda'}</div>
       <div class="muted">${r.ready_count} contenuti pronti da piani approvati · stima ${fmt(r.estimated_cost)} crediti su ${fmt(r.balance)} disponibili.</div>
-      <div style="margin-top:16px"><button class="btn primary" data-action="prod-preview">Avvia una prova senza costi</button></div>
+      <div class="row" style="margin-top:16px">
+        <button class="btn primary" data-action="prod-preview">Avvia una prova senza costi</button>
+        <button class="btn danger" data-action="prod-run" ${(!r.ready_count || !covers) ? 'disabled' : ''}>Produci davvero</button>
+      </div>
     </div></div></div>`;
   }
   return head('Produzione', 'Centro operativo della produzione') + hero + `
@@ -267,17 +272,42 @@ VIEWS.produzione = async () => {
 VIEWS.libreria = async () => {
   const r = await call('reference_stats');
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
-  return head('Libreria', 'Magazzino operativo delle reference') +
+  const statusRows = Object.keys(r.by_status || {}).length
+    ? Object.entries(r.by_status).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
+    : '<div class="empty">Nessuna reference ancora importata.</div>';
+  const weekRows = Object.keys(r.by_week || {}).length
+    ? Object.entries(r.by_week).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
+    : '<div class="faint">nessuna settimana</div>';
+  const categoryRows = Object.keys(r.by_category || {}).length
+    ? Object.entries(r.by_category).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
+    : '<div class="faint">nessuna categoria</div>';
+  const latestRows = (r.latest || []).length
+    ? r.latest.map((x) => `<div class="prow">
+        <div class="p-avatar">${esc((x.source_category || '?')[0])}</div>
+        <div style="min-width:0">
+          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${x.status === 'ready' ? 'green' : x.status === 'error' ? 'red' : 'gray'}">${esc(x.status)}</span></div>
+          <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')} ${x.has_caption ? '· caption' : ''}</div>
+        </div>
+      </div>`).join('')
+    : '<div class="empty">Nessun download recente.</div>';
+  const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>`;
+  return head('Libreria', 'Magazzino operativo delle reference', actions) +
     chipStrip([
       { label: 'Pronte', value: r.ready, color: '#8fe23a' },
       { label: 'Totali', value: r.total, color: '#4c8bf5' },
       { label: 'In attesa', value: r.pending, color: '#e8b23d' },
       { label: 'Errore', value: r.error, color: '#ff6b5e' },
+      { label: 'Vecchie', value: r.too_old, color: '#a0a7b8' },
     ]) + `
     <div class="section-title">Stato del magazzino</div>
-    <div class="card">${Object.keys(r.by_status || {}).length
-      ? Object.entries(r.by_status).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
-      : '<div class="empty">Nessuna reference ancora importata. Il sync legge dal Google Sheet.</div>'}</div>`;
+    <div class="grid cols-3">
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per stato</div>${statusRows}</div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per settimana</div>${weekRows}</div>
+      <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Per categoria</div>${categoryRows}</div>
+    </div>
+    <div class="section-title">Ultimi scaricati</div>
+    <div class="plist">${latestRows}</div>
+    <div class="faint" style="margin-top:12px">Finestra pesca: ultime ${r.selection_weeks} settimane · pulizia reference IG dopo ${r.retention_days} giorni.</div>`;
 };
 
 /* ============ Vista: Costi ============ */
@@ -417,9 +447,27 @@ const ACTIONS = {
   'plan-approve': async () => {
     if (!state.currentPlan) return;
     const r = await call('approve_plan', state.currentPlan.id);
-    if (r.ok) { state.currentPlan = r.plan; toast('Piano approvato · stima ' + fmt(r.estimated) + ' CR'); refreshBalance(); reloadPlanView(); }
+    if (r.ok) {
+      state.currentPlan = r.plan;
+      const a = r.reference_assignment || { assigned: 0, missing: r.plan.missing_references };
+      const msg = a.missing
+        ? 'Piano approvato · mancano ' + a.missing + ' reference: aggiorna Libreria'
+        : 'Piano approvato · reference assegnate ' + a.assigned;
+      toast(msg);
+      refreshBalance();
+      reloadPlanView();
+    }
     else if (r.kind === 'budget') toast('Budget non copre il piano: mancano ' + fmt(r.needed - r.available) + ' CR', 'err');
     else toast(r.error, 'err');
+  },
+  'plan-assign-refs': async () => {
+    if (!state.currentPlan) return;
+    const r = await call('assign_plan_references', state.currentPlan.id);
+    if (r.ok) {
+      state.currentPlan = r.plan;
+      toast('Reference assegnate: ' + r.assigned + (r.missing ? ' · mancanti ' + r.missing : ''));
+      reloadPlanView();
+    } else toast(r.error, 'err');
   },
   'budget-topup': async () => {
     const v = parseFloat($('#topupAmount').value);
@@ -432,9 +480,26 @@ const ACTIONS = {
     const r = await call('budget_sync');
     r.ok ? (toast('Saldo allineato: rettifica ' + fmt(r.adjustment) + ' CR'), refreshBalance(), setView('costi')) : toast(r.error, 'err');
   },
+  'references-sync': async () => {
+    toast('Aggiorno libreria…');
+    const r = await call('references_sync_policy');
+    r.ok ? (toast('Libreria aggiornata · processati ' + (r.sync?.processed ?? '—') + ' · pronte ' + r.ready), setView('libreria')) : toast(r.error, 'err');
+  },
   'prod-preview': async () => {
     const r = await call('production_preview');
     r.ok ? toast(r.ready_count + ' pronti · stima ' + fmt(r.estimated_cost) + ' CR (nessun credito speso)') : toast(r.error, 'err');
+  },
+  'prod-run': async () => {
+    const ok = confirm('Produzione reale: usera crediti Higgsfield/Claude sui contenuti pronti. Vuoi continuare?');
+    if (!ok) return;
+    toast('Produzione reale avviata…');
+    const r = await call('production_run', null, 'PRODUCI');
+    if (r.ok) {
+      const p = r.production || {};
+      toast('Produzione completata · consegnati ' + (p.delivered ?? 0) + ' · falliti ' + (p.failed ?? 0));
+      refreshBalance();
+      setView('produzione');
+    } else toast(r.error, 'err');
   },
   'backlog-filter': (el) => { state.backlogFilter = el.dataset.status; setView('backlog'); },
   'backlog-add': async () => {

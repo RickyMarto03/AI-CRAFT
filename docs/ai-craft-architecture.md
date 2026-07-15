@@ -120,11 +120,11 @@ Anche costruendo "il sistema completo", conviene un ordine — non tutto in para
 
 Queste integrano — non sostituiscono — le sezioni precedenti, sulla base di scelte fatte in fase di build:
 
-- **Google Sheet: accesso strettamente read-only.** Mai scrivere sullo sheet (niente aggiornamento di stato lì). Lo stato vive solo in `ReferenceItem.status`. Le colonne "DONE <nome persona>" nello sheet sono checkbox di un altro team, non fanno parte del nostro modello dati e vanno ignorate dal parser.
+- **Google Sheet: inizialmente read-only, poi promosso a edit controllato (15/07/2026).** Lo stato operativo dettagliato vive sempre in DB (`ReferenceItem`/`ContentPiece`), ma dopo la decisione dell'utente sulla libreria locale lo Sheet viene marcato quando AI-CRAFT scarica/acquisisce una reference: video -> `DONE RICKY`, caroselli -> background colorato sulla cella link. Vedi §14 per la logica finale.
 - **Trascrizione: Whisper locale, non Claude.** I modelli Claude (Sonnet 5 / Opus 4.8, verificato su docs ufficiali luglio 2026) supportano testo e immagini ma non hanno input audio nativo. Whisper (via `faster-whisper`) genera il transcript grezzo in `ReferenceItem.transcript`; Claude headless resta riservato agli stadi creativi a valle (prompt di rigenerazione, caption, hashtag) usando quel transcript come input testuale.
 - **Higgsfield: CLI, non MCP.** Il Production Engine è orchestrato in modo deterministico da Python, non è una sessione conversazionale con un agente. L'MCP di Higgsfield è pensato per un agente che sceglie autonomamente modello/parametri in linguaggio naturale dentro una chat — userlo così romperebbe la separazione creativo/deterministico imposta da `CLAUDE.md` e renderebbe più fragile il tracciamento costi via `CreditLedger`. Il wrapper Python (`aicraft/production/higgsfield_client.py`) chiama il CLI ufficiale via subprocess — il binario si chiama **`higgsfield`** (non `hf`: nome corretto dopo aver letto il README ufficiale del repo, `npm install -g @higgsfield/cli` poi `higgsfield auth login`), non un collegamento MCP nella sessione Claude.
 - **Download IG: Instaloader, non yt-dlp.** Serve gestire sia `video` (reel) sia `carosello` (post multi-immagine "sidecar"); Instaloader li gestisce entrambi nativamente con metadati strutturati, a differenza di yt-dlp che è video-centrico. **Autenticazione via cookie del browser locale** (Chrome di default, `browser_cookie3`), non username/password in codice: si riusa la sessione già loggata a mano su instagram.com, che evita i checkpoint/verifiche 2FA che il login diretto spesso innesca. Sessione salvata su disco dopo il primo import, rate-limiting conservativo tra un download e l'altro.
-- **Google Sheet: serve un service account vero, i cookie non bastano.** Verificato provando l'export CSV pubblico dello sheet senza credenziali: risponde `401`, è privato. A differenza di Instaloader (che riusa cookie di sessione per "impersonare" il browser sullo stesso protocollo), l'API Google Sheets richiede token OAuth/service-account: non è aggirabile con un cookie copiato in modo pulito. Setup: service account su Google Cloud con scope `spreadsheets.readonly`, sheet condiviso in sola lettura con la sua email.
+- **Google Sheet: serve un service account vero, i cookie non bastano.** Verificato provando l'export CSV pubblico dello sheet senza credenziali: risponde `401`, è privato. L'API Google Sheets richiede token OAuth/service-account: non è aggirabile con un cookie copiato in modo pulito. Setup attuale: service account Google Cloud con permesso editor sullo sheet e scope `spreadsheets`, perché il sync ora marca i download riusciti (vedi §14).
 - **Campo aggiuntivo `ReferenceItem.source_category` (non nel blueprint originale §1).** Lo sheet marca ogni link con una categoria/tag di contenuto (es. `BOOBS`/`BOOTY`/`GENERAL` nel tab CAROSELLI, `OTHER CONTENTS`/`BALLETTI/LIPSYNC`/`TALKING` nel tab VIRAL GENERAL). Non c'era una colonna per questo nello schema originale: per non perdere informazione utile a valle (Planning, assegnazione a Profile) è stata aggiunta `source_category` (testo libero) insieme a `source_tab` (nome del tab di provenienza). Estensione additiva, non rompe nulla di esistente — segnalata qui perché non esplicitamente concordata prima del build.
 - **Parsing dello sheet è label-driven, non a colonne fisse.** I due tab noti (`CAROSELLI`, `VIRAL GENERAL`) hanno layout diversi tra loro (banner di settimana su riga propria vs data annegata in una cella di intestazione categoria). Il parser (`aicraft/reference_sync/sheets_reader.py`) riconosce righe di intestazione categoria/data per contenuto della cella, non per lettera di colonna — tollera piccoli spostamenti di colonna senza rompersi, com'è stato indicato essere plausibile ("non dovrebbe variare molto, se lo farà avviso").
 - **Download IG: RISOLTO con instagrapi (14/07/2026), dopo un blocco temporaneo.** _Contesto:_ Instagram aveva inasprito il blocco anti-scraping sulle **query GraphQL del sito web** che usano Instaloader/yt-dlp/gallery-dl. Testato su 15 link reali dello sheet (inclusi 5 confermati live): Instaloader 0/15, yt-dlp 2/15 ("Instagram sent an empty media response"), gallery-dl 0/15 (redirect a login). Non era un bug nostro (documentato upstream, es. [instaloader/instaloader#2682](https://github.com/instaloader/instaloader/issues/2682)). _Soluzione:_ **instagrapi**, che colpisce l'**API "mobile"** (quella dell'app) invece del GraphQL web — endpoint diversi, non bloccati. Verificato: 5/5 su link reali (dove gli altri 3 facevano 0-2/15), con download reali sia di reel/video sia di caroselli multi-immagine sia di caroselli misti video+foto. `aicraft/reference_sync/downloader.py` riscritto su instagrapi, stessa interfaccia (`download_reference` → `DownloadResult`), quindi il resto della pipeline non cambia. Autenticazione invariata: cookie `sessionid` dal browser (`login_by_sessionid`), nessuna password in codice. **Playwright (browser reale) resta l'alternativa di riserva** se un domani anche l'API mobile venisse bloccata — non serve ora perché instagrapi funziona pulito.
@@ -159,7 +159,7 @@ Modulo `aicraft/production/`. Aggiornamento del 14/07/2026: le due integrazioni 
 **Semplificazioni consapevoli, non richieste esplicitamente:**
 - `carosello` genera **un'immagine per chiamata** (`GenerationOp.count=1` in `pipeline_spec.py`), non ancora le N immagini multiple previste da §3 ("image_regen (N immagini)"). Non c'era ancora un numero N concordato né dati reali di reference (frame_paths) su cui basare la scelta. Il meccanismo per N>1 c'è già (engine cicla su `count`, budget moltiplica per `count`): quando N sarà noto, si cambia SOLO il `count` in `pipeline_spec.py` e sia produzione sia stima si adeguano insieme.
 - `ContentPiece.content_type == "video_caption"` (presente nell'enum di §1 ma senza una riga propria in §3) è trattato con la stessa pipeline di `video_talking` per default, in attesa di una pipeline dedicata se serve differenziarla.
-- Il Production Engine dipende dallo stadio `reference_ready`, che a sua volta dipende dal download IG — attualmente bloccato (vedi nota sopra). Il motore è stato quindi validato con dati di test, non con un giro reale end-to-end su una reference vera scaricata dallo sheet.
+- Il Production Engine dipende da `reference_ready` **con `reference_id` valorizzato**: dopo l'introduzione dell'allocator (§14), pezzi approvati ma senza reference non vengono prodotti. Il download IG e' risolto via instagrapi; eventuali carenze di libreria locale vanno gestite assegnando/scaricando nuove reference prima della produzione.
 
 ---
 
@@ -351,7 +351,7 @@ L'utente ha generato per davvero delle foto con i prompt prodotti dal sistema e 
 
 ### 12.13 Cosa manca ancora
 
-- **Cattura della caption originale** durante il download (instagrapi la espone già in `media_info`, non ancora salvata su `ReferenceItem`) — serve perché le caption non si generano da zero, si copiano/adattano dall'originale.
+- **Caption originale nello stadio caption/hashtag: FATTA.** La cattura durante il download e' salvata in `ReferenceItem.original_caption`; `_stage_caption_hashtag` ora la fa adattare da Claude quando presente e usa il prompt generativo solo come fallback.
 - **Analisi video per i talking** (dialogo + movimenti + background + outfit + tempo) — FATTA, vedi §12.15. Resta aperto solo: timestamp per segmento nella trascrizione Whisper (oggi solo testo piatto, la sincronizzazione dialogo/movimento è dedotta da Claude guardando i frame senza sapere il secondo esatto di ogni frase) e la verifica con una generazione `seedance_2_0` reale (mai fatta finora, solo testo del prompt validato).
 - **Verificare `image_reference` come URL remoto per motion control** e il costo reale di `kling3_0_motion_control` (`manual_cost_estimate=16.0` è il dato dell'utente, non un job nostro completato con successo) — entrambi richiedono un job completato con successo, non solo bloccato da moderazione.
 - **Verificare `video_references` reale su `seedance_2_0`** (toggle `settings.SEEDANCE_USE_VIDEO_REFERENCE`, default OFF) — mai testato con un job pagato, vedi §12.15.
@@ -399,3 +399,118 @@ Su richiesta dell'utente: ogni volta che durante il lavoro emerge un limite noto
 **Voci reali già presenti** (seedate dopo il test reale su 3 caroselli, §12.14): fedeltà posa/outfit alla foto originale da migliorare, rifiuto Claude su contenuto sessualizzato (limite noto), lunghezza prompt occasionalmente fuori target anche dopo retry.
 
 **Test**: `tests/test_backlog.py` (6 test sul modulo backend) + 2 test aggiunti in `tests/test_desktop_api.py` (`test_backlog_add_e_list`, `test_backlog_set_status_e_filtro`). 19 test verdi su questi due file, nessuna regressione sugli altri.
+
+## 14. Libreria reference locale e allocator automatico — FATTO (15/07/2026, sessione Codex)
+
+Decisione prodotto presa con l'utente: AI-CRAFT non deve chiedere all'operatore quali link usare.
+Lo Sheet e' il feed editoriale aggiornato dal team; il DB locale e' la memoria operativa. Il sync
+scarica piu' contenuti del necessario, li organizza localmente, marca lo Sheet come "preso da Ricky",
+e poi la produzione pesca dal DB locale con una coda semplice e prevedibile.
+
+**Schema/metadati aggiunti a `ReferenceItem`:**
+- `week_start`, `week_end`, `sheet_order`, `sheet_row`, `sheet_col`, `done_ricky_col`;
+- `downloaded_at`;
+- `original_caption` (caption IG sorgente catturata da instagrapi).
+
+**Organizzazione file locali:** i media originali IG non vanno piu' solo sotto `data/media/<shortcode>/`,
+ma sotto:
+
+```
+data/media/YYYY-Www/TAB/CATEGORIA/shortcode/
+```
+
+Esempio: `data/media/2026-W29/VIRAL_GENERAL/BALLETTI_LIPSYNC/ABC123/`. La data e' quella della
+settimana nello Sheet, non la data di download.
+
+**Google Sheet ora e' editabile:** `SheetClient` usa scope `spreadsheets` invece di
+`spreadsheets.readonly`. Dopo un download riuscito, se `GOOGLE_SHEET_MARK_DOWNLOADS=1`:
+- video: flagga la colonna `DONE RICKY` della riga/categoria, quando trovata dal parser;
+- caroselli: colora il background della cella link (default giallo chiaro via
+  `GOOGLE_SHEET_CAROUSEL_MARK_COLOR`).
+
+Il significato operativo di questo segno e': **"AI-CRAFT ha acquisito/scaricato il contenuto"**,
+non "generato/consegnato". Gli stati dettagliati restano nel DB.
+
+**Allocator (`aicraft/reference_sync/allocator.py`):**
+- usa solo reference `ready` con media locale disponibile;
+- pesca dalle ultime `AICRAFT_REFERENCE_SELECTION_WEEKS` settimane disponibili (default 2);
+- dentro la finestra ordina dal piu' vecchio al piu' nuovo (`week_start`, poi `sheet_order`);
+- esclude ogni reference gia' assegnata a un `ContentPiece`;
+- supporta categoria richiesta esplicita su `ContentPiece.requested_source_category`.
+
+Mappature default:
+- `video_talking` -> `TALKING`;
+- `video_balletti` -> `BALLETTI/LIPSYNC`;
+- `video_caption` -> `CAPTION`;
+- `carosello` -> `BOOBS`, `BOOTY`, `GENERAL`;
+- `stories` -> `GENERAL` (assunzione ancora da validare col workflow reale stories).
+
+**Integrazione operativa:**
+- CLI: `python -m aicraft.cli plan assign-refs <plan_id>`;
+- API/UI desktop: endpoint `assign_plan_references`, pulsante "Assegna reference" nel Piano;
+- API/UI desktop Libreria: conteggi per stato/settimana/categoria, ultimi scaricati, reference
+  fuori retention, pulsante "Aggiorna libreria";
+- Production Engine: prima prova ad assegnare reference ai piani approvati, poi produce solo
+  `ContentPiece` con `reference_id` valorizzato. Questo evita il vecchio caso pericoloso:
+  pezzi approvati ma senza reference, che sarebbero andati in errore in `image_regen`.
+- API/CLI `approve_plan`: dopo il budget check prova subito ad assegnare reference e segnala
+  quante mancano, cosi' l'utente sa quando deve aggiornare la Libreria.
+
+**Sync controllato:** `run_once(max_items=...)` usa `AICRAFT_REFERENCE_SYNC_MAX_ITEMS` (default
+25) per evitare che il primo run scarichi centinaia di link. CLI:
+
+```
+python -m aicraft.cli references sync --limit 5
+python -m aicraft.cli references sync --tab "VIRAL GENERAL" --category TALKING --limit 2
+python -m aicraft.cli references sync --all
+```
+
+**Retention:** `cleanup_old_references()` elimina dal DB e dal filesystem solo i reference IG
+oltre `AICRAFT_REFERENCE_RETENTION_DAYS` (default 45 giorni, circa un mese e mezzo), scollegando
+eventuali `ContentPiece` storici. Non tocca mai `data/delivery` o gli asset generati da AI-CRAFT.
+
+**Migrazione DB:** non essendoci Alembic, `db/base.py` contiene una migrazione additiva minima:
+quando `init_db()` gira su un `data/aicraft.db` esistente, aggiunge le nuove colonne nullable con
+`ALTER TABLE ADD COLUMN`. E' idempotente e serve solo per evoluzioni additive leggere.
+
+**Test:** aggiunti `tests/test_reference_allocator.py` e `tests/test_reference_sync.py`, aggiornati
+parser/API/engine. Suite completa della prima iterazione libreria: 135 test verdi; dopo le
+rifiniture operative sotto: 145 test verdi.
+
+**Verifica reale successiva (15/07/2026, Codex):**
+- Primo sync con rete ha letto 1179 reference dallo Sheet e confermato permesso edit, ma e' stato
+  interrotto per evitare un download massivo non controllato. Da qui il limite batch sopra.
+- Sync controllato caroselli: 3 reference `ready` scaricate in
+  `data/media/2026-W22/CAROSELLI/...`, caption originale salvata, background giallo verificato
+  via metadata dello Sheet (`red=1, green≈0.949, blue≈0.647`); 2 link non disponibili marcati
+  `error`.
+- Sync controllato video: `references sync --tab "VIRAL GENERAL" --category TALKING --limit 2`
+  ha scaricato 2 video in `data/media/2026-W26/VIRAL_GENERAL/TALKING/...`, estratto WAV,
+  trascritto con Whisper, salvato transcript/caption, e flaggato `DONE RICKY` (verificato
+  leggendo le celle Sheet: entrambe `TRUE`).
+- Nessun credito Higgsfield consumato: tutte le generazioni nei test restano mockate.
+- Suite completa dopo le modifiche: 135 test verdi in questa prima iterazione; 145 dopo
+  l'aggiornamento operativo successivo.
+
+**Aggiornamento operativo successivo (15/07/2026, Codex):**
+- Caption/hashtag ora usa la caption originale IG quando disponibile:
+  `engine._stage_caption_hashtag` chiama `claude_creative.adapt_original_caption_and_hashtags`
+  su `ReferenceItem.original_caption`; solo in assenza di caption sorgente usa il vecchio prompt
+  generativo da transcript.
+- Produzione reale esposta in UI desktop con guardrail: endpoint `production_run(plan_id?,
+  confirmation="PRODUCI")`, auto-assign delle reference disponibili, check su `ready_count` e
+  budget stimato prima di chiamare `production.engine.run_once`; bottone "Produci davvero" nella
+  tab Produzione con conferma JS. CLI: `python -m aicraft.cli produce --plan <id>` per limitare
+  a un piano.
+- Sync bilanciato per categoria: `AICRAFT_REFERENCE_SYNC_POLICY` usa la sintassi
+  `TAB:CATEGORIA=LIMIT`, es. `CAROSELLI:BOOBS=5,VIRAL GENERAL:TALKING=5`. Il comando
+  `python -m aicraft.cli references sync-policy` legge tutto lo Sheet una volta, aggiorna il DB,
+  pulisce retention e scarica fino al limite per ogni categoria.
+- Automazione settimanale locale: `aicraft/scheduler.py` genera/installa un LaunchAgent macOS
+  (`com.aicraft.weekly-reference-sync`) che esegue `references sync-policy` una volta a settimana
+  e scrive log in `data/logs`. Il comando installa il plist ma non esegue `launchctl load` in
+  automatico, cosi' l'operatore puo' controllarlo prima.
+- Stati errore reference piu' intelligenti: downloader/transcriber salvano `download_error`,
+  `unavailable`, `private`, `transcription_error` quando possibile. Questi stati restano
+  ritentabili dal sync policy e la UI li aggrega nel conteggio "Errore".
+- Suite completa dopo l'aggiornamento: 145 test verdi.

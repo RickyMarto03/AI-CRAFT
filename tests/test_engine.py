@@ -176,6 +176,36 @@ def test_process_content_piece_tipo_sconosciuto_marca_errore(session):
     assert piece.status == "error"
 
 
+def test_caption_hashtag_adatta_caption_originale_quando_presente(monkeypatch):
+    reference = ReferenceItem(
+        source_url="https://www.instagram.com/reel/CAPTION/",
+        status="ready",
+        transcript="ciao a tutti",
+        original_caption="Caption originale #old",
+    )
+    piece = ContentPiece(content_type="video_talking", status="caption_hashtag")
+
+    seen = {}
+
+    def fake_adapt_original_caption_and_hashtags(**kwargs):
+        seen.update(kwargs)
+        return {"caption": "Caption adattata", "hashtags": ["#old", "#new"]}
+
+    monkeypatch.setattr(engine_module.claude_creative, "adapt_original_caption_and_hashtags", fake_adapt_original_caption_and_hashtags)
+    monkeypatch.setattr(
+        engine_module.claude_creative,
+        "write_caption_and_hashtags",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("non deve inventare da zero")),
+    )
+
+    engine_module._stage_caption_hashtag(piece, reference)
+
+    assert seen["original_caption"] == "Caption originale #old"
+    assert seen["transcript"] == "ciao a tutti"
+    assert piece.caption == "Caption adattata"
+    assert piece.hashtags == ["#old", "#new"]
+
+
 def test_video_balletti_usa_motion_control_con_video_originale(session, tmp_path, monkeypatch):
     """video_balletti ha una convenzione di chiamata diversa dagli altri
     video (niente prompt, serve il video originale) — vedi pipeline_spec.py
@@ -440,10 +470,21 @@ def test_run_once_produce_solo_piani_approvati(session, monkeypatch):
     profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
     plan_bozza = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="bozza")
     plan_appr = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 27), week_end=dt.date(2026, 8, 2), status="approvato")
+    ref = ReferenceItem(
+        source_url="https://www.instagram.com/p/READY/",
+        source_tab="CAROSELLI",
+        source_category="BOOBS",
+        content_type_hint="carosello",
+        week_start=dt.date(2026, 7, 20),
+        week_end=dt.date(2026, 7, 26),
+        sheet_order=1,
+        status="ready",
+        frame_paths=["/tmp/foto.jpg"],
+    )
     piece_bozza = ContentPiece(profile=profile, content_type="carosello", plan_week=plan_bozza, status="reference_ready")
     piece_appr = ContentPiece(profile=profile, content_type="carosello", plan_week=plan_appr, status="reference_ready")
     piece_senza_piano = ContentPiece(profile=profile, content_type="carosello", status="reference_ready")
-    session.add_all([creator, profile, plan_bozza, plan_appr, piece_bozza, piece_appr, piece_senza_piano])
+    session.add_all([creator, profile, plan_bozza, plan_appr, ref, piece_bozza, piece_appr, piece_senza_piano])
     session.commit()
 
     processed = []

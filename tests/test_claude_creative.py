@@ -218,3 +218,23 @@ def test_write_talking_video_prompt_menziona_uso_video_reference_solo_se_attivo(
 
     assert "SOLO come riferimento di movimento" in seen_prompts[0]
     assert "Non c'e' nessun video di riferimento" in seen_prompts[1]
+
+
+def test_adapt_original_caption_and_hashtags_parsa_json(monkeypatch):
+    seen = {}
+
+    def fake_run_headless(prompt, **kw):
+        seen["prompt"] = prompt
+        return json.dumps({"caption": "Nuova caption", "hashtags": ["#fit", "#ig"]})
+
+    monkeypatch.setattr(claude_creative, "run_headless", fake_run_headless)
+
+    result = claude_creative.adapt_original_caption_and_hashtags(
+        original_caption="Caption originale #fit",
+        transcript="ciao",
+        content_type="video_talking",
+    )
+
+    assert result == {"caption": "Nuova caption", "hashtags": ["#fit", "#ig"]}
+    assert "Caption originale #fit" in seen["prompt"]
+    assert "non inventare" in seen["prompt"]

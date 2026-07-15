@@ -1,4 +1,4 @@
-"""Lettura READ-ONLY del Google Sheet di reference.
+"""Lettura + mark controllato del Google Sheet di reference.
 
 Il parsing e' guidato dal contenuto delle celle (nomi di categoria, pattern
 di data), non da lettere di colonna fisse: i due tab noti ("CAROSELLI" e
@@ -22,6 +22,7 @@ CONTENT_TYPE_BY_CATEGORY = {
     "OTHER CONTENTS": "video",
     "BALLETTI/LIPSYNC": "video",
     "TALKING": "video",
+    "CAPTION": "video",
 }
 
 _DATE_RANGE_RE = re.compile(
@@ -69,6 +70,10 @@ class SheetReference:
     week_start: Optional[dt.date]
     week_end: Optional[dt.date]
     sheet_row_id: str
+    sheet_order: int
+    sheet_row: int
+    sheet_col: int
+    done_ricky_col: Optional[int] = None
 
 
 def _is_url(value: str) -> bool:
@@ -107,6 +112,7 @@ def parse_rows(rows: list[list[str]], tab_name: str, year: int) -> list[SheetRef
     """
     references: list[SheetReference] = []
     category_columns: dict[str, int] = {}
+    done_ricky_columns: dict[str, int] = {}
     current_week: Optional[tuple[dt.date, dt.date]] = None
 
     for row_idx, row in enumerate(rows, start=1):
@@ -126,7 +132,21 @@ def parse_rows(rows: list[list[str]], tab_name: str, year: int) -> list[SheetRef
         }
         if found_categories:
             category_columns = found_categories
+            done_ricky_columns = {}
             continue
+
+        if category_columns:
+            # Nei tab video ogni categoria ha colonne DONE subito dopo la
+            # colonna URL. Memorizziamo quella di Ricky (1-based nel dataclass)
+            # per poterla flaggare quando il download e' riuscito.
+            upper_cells = [c.upper().replace("  ", " ") for c in cells]
+            sorted_categories = sorted(category_columns.items(), key=lambda kv: kv[1])
+            for idx, (category, col_idx) in enumerate(sorted_categories):
+                next_col = sorted_categories[idx + 1][1] if idx + 1 < len(sorted_categories) else len(cells)
+                for done_idx in range(col_idx + 1, min(next_col, len(cells))):
+                    if upper_cells[done_idx] in ("DONE RICKY", "DONE RICCARDO"):
+                        done_ricky_columns[category] = done_idx
+                        break
 
         if not category_columns:
             continue
@@ -147,6 +167,10 @@ def parse_rows(rows: list[list[str]], tab_name: str, year: int) -> list[SheetRef
                     week_start=week_start,
                     week_end=week_end,
                     sheet_row_id=f"{tab_name}!R{row_idx}C{col_idx + 1}",
+                    sheet_order=len(references) + 1,
+                    sheet_row=row_idx,
+                    sheet_col=col_idx + 1,
+                    done_ricky_col=(done_ricky_columns.get(category) + 1 if category in done_ricky_columns else None),
                 )
             )
 
@@ -154,14 +178,14 @@ def parse_rows(rows: list[list[str]], tab_name: str, year: int) -> list[SheetRef
 
 
 class SheetClient:
-    """Wrapper read-only su gspread. Import lazy: non serve gspread
+    """Wrapper gspread. Import lazy: non serve gspread
     installato per usare/testare ``parse_rows`` da solo."""
 
     def __init__(self, service_account_file: str, sheet_id: str):
         import gspread
         from google.oauth2.service_account import Credentials
 
-        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(service_account_file, scopes=scopes)
         self._client = gspread.authorize(creds)
         self._spreadsheet = self._client.open_by_key(sheet_id)
@@ -169,6 +193,25 @@ class SheetClient:
     def read_tab(self, tab_name: str) -> list[list[str]]:
         worksheet = self._spreadsheet.worksheet(tab_name)
         return worksheet.get_all_values()
+
+    def mark_downloaded(self, ref: SheetReference, *, carousel_color: tuple[float, float, float]) -> None:
+        """Segna sullo sheet che AI-CRAFT ha scaricato/acquisito la reference.
+
+        Video: flagga DONE RICKY quando la colonna esiste.
+        Caroselli: colora la cella del link, senza aggiungere colonne/righe.
+        Il DB resta la fonte vera dello stato operativo.
+        """
+        worksheet = self._spreadsheet.worksheet(ref.source_tab)
+        if ref.source_tab.upper() == "CAROSELLI" or ref.content_type_hint == "carosello":
+            from gspread.utils import rowcol_to_a1
+
+            a1 = rowcol_to_a1(ref.sheet_row, ref.sheet_col)
+            red, green, blue = carousel_color
+            worksheet.format(a1, {"backgroundColor": {"red": red, "green": green, "blue": blue}})
+            return
+
+        if ref.done_ricky_col is not None:
+            worksheet.update_cell(ref.sheet_row, ref.done_ricky_col, "TRUE")
 
 
 def fetch_references(client: SheetClient, tabs: list[str], year: int) -> list[SheetReference]:

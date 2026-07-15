@@ -12,7 +12,10 @@
     python -m aicraft.cli plan add <plan_id> carosello --giorno lun
     python -m aicraft.cli plan show <plan_id>
     python -m aicraft.cli plan approve <plan_id>
-    python -m aicraft.cli references sync              # sheet -> DB -> download (download IG bloccato)
+    python -m aicraft.cli references sync --limit 5    # sheet -> DB -> download + mark sheet
+    python -m aicraft.cli references sync --tab "VIRAL GENERAL" --category TALKING --limit 2
+    python -m aicraft.cli references sync-policy       # sync bilanciato per categoria
+    python -m aicraft.cli scheduler install-weekly-sync
     python -m aicraft.cli produce                       # esegue la pipeline sui piani approvati
 
 Ogni comando apre una sessione, esegue, committa. Nessuna logica di dominio
@@ -35,6 +38,7 @@ from .db.base import SessionLocal, init_db
 from .db.models import ContentPiece, PlanWeek, Profile
 from .planning import plan as planning
 from .profiles import manager as profiles
+from .reference_sync import allocator
 from . import reporting
 
 
@@ -122,7 +126,12 @@ def cmd_plan_add(session, args):
         print(f"Piano {args.plan_id} inesistente", file=sys.stderr)
         sys.exit(1)
     piece = planning.add_content_piece(
-        session, plan, content_type=args.content_type, scheduled_day=args.giorno, reference_id=args.reference
+        session,
+        plan,
+        content_type=args.content_type,
+        scheduled_day=args.giorno,
+        reference_id=args.reference,
+        requested_source_category=args.category,
     )
     print(f"Aggiunto ContentPiece [{piece.id}] {piece.content_type} (giorno={piece.scheduled_day}) al piano {plan.id} (ora v{plan.version}, {plan.status})")
 
@@ -152,7 +161,23 @@ def cmd_plan_approve(session, args):
         session.rollback()
         print(f"APPROVAZIONE BLOCCATA — {exc}", file=sys.stderr)
         sys.exit(2)
+    assignment = allocator.assign_references_to_plan(session, plan.id)
     print(f"Piano [{plan.id}] APPROVATO. Costo stimato: {estimated:.2f} crediti. Saldo: {budget_ledger.current_balance(session):.2f}")
+    print(f"Reference assegnate: {assignment.assigned} (mancanti: {assignment.missing})")
+    if assignment.missing:
+        print("Libreria insufficiente: esegui `references sync` per scaricare nuovi reference.")
+
+
+def cmd_plan_assign_refs(session, args):
+    plan = session.get(PlanWeek, args.plan_id)
+    if plan is None:
+        print(f"Piano {args.plan_id} inesistente", file=sys.stderr)
+        sys.exit(1)
+    result = allocator.assign_references_to_plan(session, plan.id)
+    print(
+        f"Reference assegnate al piano [{plan.id}]: {result.assigned} "
+        f"(mancanti: {result.missing})"
+    )
 
 
 # --- references / produce ---
@@ -160,15 +185,58 @@ def cmd_plan_approve(session, args):
 def cmd_references_sync(session, args):
     from .reference_sync.sync import run_once as ref_run_once
 
-    ref_run_once()
-    print("Reference sync completato (nota: il download IG e' attualmente bloccato lato Instagram).")
+    max_items = 0 if args.all else args.limit
+    result = ref_run_once(max_items=max_items, source_tab=args.tab, source_category=args.category)
+    print(
+        "Reference sync completato. "
+        f"Processati: {result['processed']} / {result['pending_total']} candidati "
+        f"(sheet refs: {result['sheet_refs']}, cleanup: {result['cleanup_deleted']})."
+    )
+
+
+def cmd_references_sync_policy(session, args):
+    from .reference_sync.sync import run_policy_once
+
+    result = run_policy_once(policy=args.policy)
+    rows = ", ".join(f"{p['tab']}:{p['category']}={p['processed']}/{p['limit']}" for p in result["policy"])
+    print(
+        "Reference sync policy completato. "
+        f"Processati: {result['processed']} (sheet refs: {result['sheet_refs']}, cleanup: {result['cleanup_deleted']})."
+    )
+    if rows:
+        print(f"Dettaglio policy: {rows}")
 
 
 def cmd_produce(session, args):
     from .production.engine import run_once as prod_run_once
 
-    prod_run_once(session)
-    print("Produzione completata sui piani approvati.")
+    result = prod_run_once(session, plan_id=args.plan)
+    print(
+        "Produzione completata. "
+        f"Piani approvati: {result['approved_plans']}, "
+        f"reference assegnate: {result['assigned_references']}, "
+        f"mancanti: {result['missing_references']}, "
+        f"processati: {result['processed']}, "
+        f"consegnati: {result['delivered']}, "
+        f"falliti: {result['failed']}."
+    )
+
+
+def cmd_scheduler_plist(session, args):
+    from . import scheduler
+
+    data = scheduler.plist_bytes(
+        scheduler.launchd_plist(weekday=args.weekday, hour=args.hour, minute=args.minute)
+    )
+    print(data.decode("utf-8"))
+
+
+def cmd_scheduler_install_weekly_sync(session, args):
+    from . import scheduler
+
+    path = scheduler.install_weekly_sync(weekday=args.weekday, hour=args.hour, minute=args.minute)
+    print(f"LaunchAgent scritto: {path}")
+    print("Per caricarlo: launchctl load ~/Library/LaunchAgents/com.aicraft.weekly-reference-sync.plist")
 
 
 def select_pieces(plan_id):
@@ -223,6 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("content_type")
     a.add_argument("--giorno", choices=("lun", "mar", "mer", "gio", "ven", "sab", "dom"))
     a.add_argument("--reference", type=int, default=None)
+    a.add_argument("--category", default=None, help="Categoria sorgente desiderata (es. BOOBS, TALKING)")
     a.set_defaults(func=cmd_plan_add)
     a = plan_sub.add_parser("show", help="Mostra un piano e i suoi pezzi")
     a.add_argument("plan_id", type=int)
@@ -230,12 +299,38 @@ def build_parser() -> argparse.ArgumentParser:
     a = plan_sub.add_parser("approve", help="Approva un piano (con controllo budget)")
     a.add_argument("plan_id", type=int)
     a.set_defaults(func=cmd_plan_approve)
+    a = plan_sub.add_parser("assign-refs", help="Assegna automaticamente reference pronte dal DB locale")
+    a.add_argument("plan_id", type=int)
+    a.set_defaults(func=cmd_plan_assign_refs)
 
     p_ref = sub.add_parser("references", help="Reference sync")
     ref_sub = p_ref.add_subparsers(dest="sub", required=True)
-    ref_sub.add_parser("sync", help="Sincronizza dal Google Sheet").set_defaults(func=cmd_references_sync)
+    a = ref_sub.add_parser("sync", help="Sincronizza dal Google Sheet")
+    a.add_argument("--limit", type=int, default=None, help="numero massimo di reference da scaricare in questo run")
+    a.add_argument("--all", action="store_true", help="scarica tutti i candidati del run, senza limite")
+    a.add_argument("--tab", default=None, help="filtra un tab dello sheet (es. CAROSELLI)")
+    a.add_argument("--category", default=None, help="filtra una categoria sorgente (es. TALKING, BOOBS)")
+    a.set_defaults(func=cmd_references_sync)
+    a = ref_sub.add_parser("sync-policy", help="Sincronizza usando AICRAFT_REFERENCE_SYNC_POLICY")
+    a.add_argument("--policy", default=None, help="override policy, es. 'CAROSELLI:BOOBS=5,VIRAL GENERAL:TALKING=3'")
+    a.set_defaults(func=cmd_references_sync_policy)
 
-    sub.add_parser("produce", help="Esegue la produzione sui piani approvati").set_defaults(func=cmd_produce)
+    p_sched = sub.add_parser("scheduler", help="Automazioni locali")
+    sched_sub = p_sched.add_subparsers(dest="sub", required=True)
+    a = sched_sub.add_parser("plist", help="Stampa il plist launchd del sync settimanale")
+    a.add_argument("--weekday", type=int, default=2, help="launchd weekday: 1=dom, 2=lun, ... 7=sab")
+    a.add_argument("--hour", type=int, default=9)
+    a.add_argument("--minute", type=int, default=0)
+    a.set_defaults(func=cmd_scheduler_plist)
+    a = sched_sub.add_parser("install-weekly-sync", help="Installa LaunchAgent per sync settimanale")
+    a.add_argument("--weekday", type=int, default=2, help="launchd weekday: 1=dom, 2=lun, ... 7=sab")
+    a.add_argument("--hour", type=int, default=9)
+    a.add_argument("--minute", type=int, default=0)
+    a.set_defaults(func=cmd_scheduler_install_weekly_sync)
+
+    a = sub.add_parser("produce", help="Esegue la produzione sui piani approvati")
+    a.add_argument("--plan", type=int, default=None, help="limita la produzione a un piano approvato")
+    a.set_defaults(func=cmd_produce)
 
     return parser
 

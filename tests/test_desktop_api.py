@@ -2,14 +2,18 @@
 finta). Verifica che i metodi chiamabili dal frontend ritornino i dati reali
 attesi e gestiscano gli errori come {ok: False}."""
 
+import datetime as dt
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from aicraft.budget import ledger
 from aicraft.db.base import Base
+from aicraft.db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
 from aicraft.desktop import api as api_mod
 from aicraft.production import higgsfield_client
+from aicraft.reference_sync import sync as reference_sync
 
 
 @pytest.fixture
@@ -123,6 +127,34 @@ def test_approvazione_bloccata_e_poi_ok(api):
     ok = api.approve_plan(plan_id)
     assert ok["ok"]
     assert ok["plan"]["status"] == "approvato"
+    assert ok["reference_assignment"]["missing"] == 1
+
+
+def test_approvazione_assegna_reference_pronta(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    plan_id = api.create_plan(1, "2026-07-20", "2026-07-26")["plan"]["id"]
+    api.plan_set_cell(plan_id, "carosello", "lun", 1)
+    with api_mod.SessionLocal() as session:
+        session.add(ReferenceItem(
+            source_url="https://www.instagram.com/p/OK/",
+            source_tab="CAROSELLI",
+            source_category="BOOBS",
+            content_type_hint="carosello",
+            week_start=dt.date(2026, 7, 13),
+            week_end=dt.date(2026, 7, 19),
+            sheet_order=1,
+            status="ready",
+            frame_paths=["/tmp/foto.jpg"],
+        ))
+        session.commit()
+    api.budget_topup(100.0)
+
+    ok = api.approve_plan(plan_id)
+
+    assert ok["ok"]
+    assert ok["reference_assignment"]["assigned"] == 1
+    assert ok["plan"]["missing_references"] == 0
 
 
 def test_budget_status_con_piano_mostra_copertura(api):
@@ -150,9 +182,132 @@ def test_production_preview_solo_piani_approvati(api):
 
     api.budget_topup(100.0)
     api.approve_plan(plan_id)
+    api.assign_plan_references(plan_id)
     prev = api.production_preview()
-    assert prev["ready_count"] == 2
-    assert prev["estimated_cost"] == pytest.approx(0.72)  # 2 pezzi x (count=3 x 0.12)
+    assert prev["ready_count"] == 0  # nessuna reference pronta nel DB locale
+
+
+def test_production_run_richiede_conferma(api):
+    r = api.production_run(confirmation=None)
+
+    assert r["ok"] is False
+    assert "Conferma richiesta" in r["error"]
+
+
+def test_production_run_chiama_engine_se_pronto(api, monkeypatch):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.budget_topup(100.0)
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+        ref = ReferenceItem(
+            source_url="https://www.instagram.com/p/RUN/",
+            source_tab="CAROSELLI",
+            source_category="BOOBS",
+            content_type_hint="carosello",
+            week_start=dt.date(2026, 7, 13),
+            week_end=dt.date(2026, 7, 19),
+            sheet_order=1,
+            status="ready",
+            frame_paths=["/tmp/foto.jpg"],
+        )
+        piece = ContentPiece(profile=profile, plan_week=plan, reference=ref, content_type="carosello", status="reference_ready")
+        session.add_all([plan, ref, piece])
+        session.commit()
+
+    seen = {}
+
+    def fake_run_once(session, plan_id=None):
+        seen["plan_id"] = plan_id
+        return {"approved_plans": 1, "assigned_references": 0, "missing_references": 0, "processed": 1, "delivered": 1, "failed": 0}
+
+    monkeypatch.setattr(api_mod.production_engine, "run_once", fake_run_once)
+
+    r = api.production_run(confirmation="PRODUCI")
+
+    assert r["ok"]
+    assert seen["plan_id"] is None
+    assert r["preview_before"]["ready_count"] == 1
+    assert r["production"]["delivered"] == 1
+
+
+def test_reference_stats_mostra_settimane_categorie_e_latest(api):
+    with api_mod.SessionLocal() as session:
+        session.add(ReferenceItem(
+            source_url="https://www.instagram.com/p/A/",
+            source_tab="CAROSELLI",
+            source_category="BOOBS",
+            content_type_hint="carosello",
+            week_start=dt.date(2026, 7, 13),
+            week_end=dt.date(2026, 7, 19),
+            sheet_order=1,
+            status="ready",
+            frame_paths=["/tmp/a.jpg"],
+            original_caption="ciao",
+            downloaded_at=dt.datetime(2026, 7, 15, 12, 0),
+        ))
+        session.commit()
+
+    r = api.reference_stats()
+
+    assert r["ok"]
+    assert r["ready"] == 1
+    assert r["by_week"]["2026-07-13"] == 1
+    assert r["by_category"]["CAROSELLI / BOOBS"] == 1
+    assert r["latest"][0]["has_caption"] is True
+
+
+def test_references_sync_endpoint(api, monkeypatch):
+    def fake_run_once(max_items=None, source_tab=None, source_category=None):
+        with api_mod.SessionLocal() as session:
+            session.add(ReferenceItem(
+                source_url="https://www.instagram.com/reel/T/",
+                source_tab="VIRAL GENERAL",
+                source_category="TALKING",
+                content_type_hint="video",
+                week_start=dt.date(2026, 7, 13),
+                week_end=dt.date(2026, 7, 19),
+                sheet_order=1,
+                status="ready",
+                local_video_path="/tmp/t.mp4",
+            ))
+            session.commit()
+
+    monkeypatch.setattr(reference_sync, "run_once", fake_run_once)
+
+    r = api.references_sync()
+
+    assert r["ok"]
+    assert r["total"] == 1
+    assert r["by_category"]["VIRAL GENERAL / TALKING"] == 1
+
+
+def test_references_sync_policy_endpoint(api, monkeypatch):
+    def fake_run_policy_once(policy=None):
+        with api_mod.SessionLocal() as session:
+            session.add(ReferenceItem(
+                source_url="https://www.instagram.com/p/POLICY/",
+                source_tab="CAROSELLI",
+                source_category="BOOTY",
+                content_type_hint="carosello",
+                week_start=dt.date(2026, 7, 13),
+                week_end=dt.date(2026, 7, 19),
+                sheet_order=1,
+                status="download_error",
+                frame_paths=[],
+            ))
+            session.commit()
+        return {"sheet_refs": 1, "processed": 1, "cleanup_deleted": 0, "policy": []}
+
+    monkeypatch.setattr(reference_sync, "run_policy_once", fake_run_policy_once)
+
+    r = api.references_sync_policy(policy="CAROSELLI:BOOTY=1")
+
+    assert r["ok"]
+    assert r["sync"]["processed"] == 1
+    assert r["error"] == 1
+    assert r["by_status"]["download_error"] == 1
 
 
 def test_backlog_add_e_list(api):

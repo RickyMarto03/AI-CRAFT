@@ -53,6 +53,7 @@ def add_content_piece(
     content_type: str,
     scheduled_day: Optional[str] = None,
     reference_id: Optional[int] = None,
+    requested_source_category: Optional[str] = None,
     policy: Optional[quota_mod.QuotaPolicy] = None,
 ) -> ContentPiece:
     if scheduled_day is not None and scheduled_day not in quota_mod.GIORNI_VALIDI:
@@ -68,6 +69,7 @@ def add_content_piece(
         content_type=content_type,
         plan_week_id=plan.id,
         scheduled_day=scheduled_day,
+        requested_source_category=requested_source_category,
         status="reference_ready",
     )
     session.add(piece)

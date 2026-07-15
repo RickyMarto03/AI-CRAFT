@@ -192,6 +192,36 @@ def write_caption_and_hashtags(*, transcript: str, content_type: str) -> dict:
     return {"caption": str(data["caption"]), "hashtags": [str(h) for h in data["hashtags"]]}
 
 
+def adapt_original_caption_and_hashtags(*, original_caption: str, transcript: str = "", content_type: str) -> dict:
+    """Adatta una caption Instagram sorgente invece di inventarla da zero.
+
+    Il workflow concordato con l'utente prevede che caption/hashtag siano
+    copiati/adattati dal post originale quando disponibili. Claude puo'
+    ripulire mention/link/testi incoerenti col nuovo contenuto, ma non deve
+    cambiare tono o inventare un angolo editoriale nuovo.
+    """
+    prompt = (
+        f"Adatta questa caption Instagram originale per un contenuto rigenerato di tipo '{content_type}'.\n\n"
+        f"CAPTION ORIGINALE:\n\"\"\"\n{original_caption.strip()}\n\"\"\"\n\n"
+        f"TRASCRIZIONE DI SUPPORTO, se utile:\n\"\"\"\n{transcript.strip()}\n\"\"\"\n\n"
+        "Regole: mantieni tono e intenzione della caption originale; rimuovi o ripulisci solo elementi non "
+        "riutilizzabili (tag persona specifici, call-to-action non adatte, link, testo rotto); non inventare "
+        "una caption completamente nuova; conserva gli hashtag utili gia' presenti e aggiungine pochi solo se "
+        "servono davvero.\n\n"
+        f"Rispondi SOLO con un JSON valido in questa forma esatta: {CAPTION_HASHTAG_SCHEMA_HINT}. "
+        "Nessun altro testo, nessun markdown."
+    )
+    raw = _strip_markdown_fence(run_headless(prompt, allowed_tools=[]).strip())
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ClaudeCreativeError(f"Caption originale adattata non nel formato JSON atteso: {raw[:300]!r}") from exc
+
+    if "caption" not in data or "hashtags" not in data:
+        raise ClaudeCreativeError(f"JSON caption originale incompleto: {data}")
+    return {"caption": str(data["caption"]), "hashtags": [str(h) for h in data["hashtags"]]}
+
+
 def _scene_target_range(character) -> tuple:
     """Range di lunghezza per la SOLA parte scritta da Claude (outfit/posa/
     background). La descrizione fisica fissa + i modificatori obbligatori

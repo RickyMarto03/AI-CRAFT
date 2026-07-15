@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..budget import ledger
 from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
+from ..reference_sync import allocator
 from . import carousel_selection, character, claude_creative, delivery, frame_picker, higgsfield_client, pipeline_spec, qa, settings
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,15 @@ def _stage_qa(piece: ContentPiece) -> None:
 
 def _stage_caption_hashtag(piece: ContentPiece, reference: Optional[ReferenceItem]) -> None:
     transcript = reference.transcript if reference else ""
-    data = claude_creative.write_caption_and_hashtags(transcript=transcript or "", content_type=piece.content_type)
+    original_caption = (reference.original_caption if reference else "") or ""
+    if original_caption.strip():
+        data = claude_creative.adapt_original_caption_and_hashtags(
+            original_caption=original_caption,
+            transcript=transcript or "",
+            content_type=piece.content_type,
+        )
+    else:
+        data = claude_creative.write_caption_and_hashtags(transcript=transcript or "", content_type=piece.content_type)
     piece.caption = data["caption"]
     piece.hashtags = data["hashtags"]
 
@@ -281,17 +290,53 @@ def process_content_piece(session: Session, piece: ContentPiece) -> None:
         session.commit()
 
 
-def run_once(session: Session) -> None:
+def run_once(session: Session, *, plan_id: int | None = None) -> dict:
     from sqlalchemy import select
+
+    plan_stmt = select(PlanWeek).where(PlanWeek.status == "approvato")
+    if plan_id is not None:
+        plan_stmt = plan_stmt.where(PlanWeek.id == plan_id)
+    approved_plans = session.scalars(plan_stmt).all()
+    assigned_total = 0
+    missing_total = 0
+    for plan in approved_plans:
+        result = allocator.assign_references_to_plan(session, plan.id)
+        assigned_total += result.assigned
+        missing_total += result.missing
+        if result.assigned:
+            logger.info(
+                "Assegnate %d reference al piano %s prima della produzione (%d mancanti)",
+                result.assigned,
+                plan.id,
+                result.missing,
+            )
+    session.commit()
 
     # Si producono solo i pezzi di piani APPROVATI (blueprint §2: "per ogni
     # ContentPiece approvato"). Il join esclude naturalmente i pezzi senza
     # piano o in piani ancora in bozza.
-    pending = session.scalars(
+    pending_stmt = (
         select(ContentPiece)
         .join(PlanWeek, ContentPiece.plan_week_id == PlanWeek.id)
-        .where(ContentPiece.status == "reference_ready", PlanWeek.status == "approvato")
-    ).all()
+        .where(
+            ContentPiece.status == "reference_ready",
+            ContentPiece.reference_id.is_not(None),
+            PlanWeek.status == "approvato",
+        )
+    )
+    if plan_id is not None:
+        pending_stmt = pending_stmt.where(ContentPiece.plan_week_id == plan_id)
+    pending = session.scalars(pending_stmt).all()
     logger.info("%d ContentPiece pronti per la produzione (piani approvati)", len(pending))
+    before = {piece.id: piece.status for piece in pending}
     for piece in pending:
         process_content_piece(session, piece)
+    session.flush()
+    return {
+        "approved_plans": len(approved_plans),
+        "assigned_references": assigned_total,
+        "missing_references": missing_total,
+        "processed": len(pending),
+        "delivered": sum(1 for piece in pending if piece.status == "delivered"),
+        "failed": sum(1 for piece in pending if piece.status not in ("delivered", before.get(piece.id))),
+    }

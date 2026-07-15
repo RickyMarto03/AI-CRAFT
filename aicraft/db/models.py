@@ -59,6 +59,21 @@ class ReferenceItem(Base):
     source_category: Mapped[Optional[str]]
     source_tab: Mapped[Optional[str]]
 
+    # Settimana/posizione lette dallo sheet. Servono alla libreria locale:
+    # si scarica per settimana/categoria e poi si pesca dal DB in ordine
+    # cronologico, senza chiedere all'utente di scegliere i link uno per uno.
+    week_start: Mapped[Optional[dt.date]]
+    week_end: Mapped[Optional[dt.date]]
+    sheet_order: Mapped[Optional[int]]
+    sheet_row: Mapped[Optional[int]]
+    sheet_col: Mapped[Optional[int]]
+    done_ricky_col: Mapped[Optional[int]]
+
+    # Caption originale IG: il workflow deciso con l'utente prevede di
+    # copiarla/adattarla, non inventarla da zero in Claude.
+    original_caption: Mapped[Optional[str]]
+    downloaded_at: Mapped[Optional[dt.datetime]]
+
     error_message: Mapped[Optional[str]]
 
     imported_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
@@ -87,6 +102,11 @@ class ContentPiece(Base):
     generated_assets: Mapped[Optional[list]] = mapped_column(JSON, default=list)
     caption: Mapped[Optional[str]]
     hashtags: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+
+    # Categoria richiesta per la reference sorgente, quando serve un vincolo
+    # esplicito (es. "carosello BOOBS"). Se vuoto, l'allocator sceglie la
+    # categoria naturale del content_type.
+    requested_source_category: Mapped[Optional[str]]
 
     cost_credits_estimated: Mapped[Optional[float]]
     cost_credits_actual: Mapped[Optional[float]]

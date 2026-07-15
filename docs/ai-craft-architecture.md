@@ -663,3 +663,32 @@ movimento dal video sorgente via `video_references` di `kling3_0_motion_control`
 toggle `SEEDANCE_USE_VIDEO_REFERENCE`, che riguarda solo `seedance_2_0`). Fedeltà visiva
 foto-vs-originale non ancora rivalutata a occhio dall'utente su questi due nuovi output — da fare
 consultando la cartella di review.
+
+## 18. Tracking a checkpoint della produzione — FATTO (15/07/2026, sessione Claude)
+
+Richiesto dall'utente subito dopo il primo test reale: prima si vedeva solo lo status corrente di
+un `ContentPiece`, non quanto ci ha messo ogni stadio o dove si è eventualmente bloccato. Nuova
+tabella `ContentPieceEvent` (`content_piece_id`, `stage`, `status` "started"/"completed"/"failed",
+`duration_seconds`, `detail`, `timestamp`) scritta da `engine.process_content_piece` ad ogni
+inizio/fine stadio.
+
+**Attenzione all'atomicità**: il codice esistente, su un fallimento di stadio, fa `session.rollback()`
+prima di marcare lo stato finale — scarta di proposito modifiche parziali (es. 1 foto su 3 di un
+carosello generata prima che la seconda fallisse). Registrare l'evento "failed" **prima** del
+rollback avrebbe silenziosamente committato anche quello stato parziale (visto che `_record_event`
+fa un `commit()`, non un `flush()`, per essere visibile subito ad altri processi/sessioni che
+guardano la timeline mentre la produzione gira). Fix: nel loop di `process_content_piece`, il
+rollback avviene PRIMA di registrare l'evento "failed" — comportamento esistente invariato, evento
+comunque registrato in modo durevole. Gli eventi "started"/"completed" non hanno questo problema
+(nessuna modifica parziale da scartare).
+
+**API**: `list_content_pieces(status?, plan_id?, limit=30)` (elenco pezzi recenti con costo/stato),
+`piece_timeline(piece_id)` (eventi in ordine cronologico). **UI**: tab Produzione, nuova sezione
+"Pezzi recenti" — click su un pezzo espande/richiude la sua timeline inline (stage, esito, durata,
+eventuale messaggio d'errore).
+
+**Test**: `test_engine.py` estende il test end-to-end `delivered` per verificare la sequenza
+completa di eventi (started/completed per ogni stadio) e le durate valorizzate; nuovo test sul
+percorso `too_long` per verificare che un fallimento produca `started`+`failed` (non `completed`)
+con `detail` popolato. `test_desktop_api.py`: filtri di `list_content_pieces`, ordine cronologico
+di `piece_timeline`, id inesistente. 171 test verdi in tutto il progetto.

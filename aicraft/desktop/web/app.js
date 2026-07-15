@@ -1,7 +1,7 @@
 'use strict';
 
 /* ============ Bridge & stato ============ */
-const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' } };
+const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' }, expandedPieceId: null };
 
 async function call(method, ...args) {
   try {
@@ -298,8 +298,21 @@ VIEWS.piano = async () => {
 };
 
 /* ============ Vista: Produzione ============ */
+function timelineRows(events) {
+  if (!events || !events.length) return '<div class="faint">Nessun evento ancora.</div>';
+  return events.map((e) => `
+    <div class="row" style="padding:3px 0;font-size:11.5px">
+      <span class="badge ${e.status === 'completed' ? 'green' : e.status === 'failed' ? 'red' : 'amber'}" style="min-width:78px;text-align:center">${esc(e.status)}</span>
+      <span style="flex:1">${esc(e.stage)}</span>
+      ${e.duration_seconds != null ? `<span class="num faint">${e.duration_seconds.toFixed(1)}s</span>` : ''}
+      <span class="faint" style="margin-left:8px">${esc((e.timestamp || '').replace('T', ' ').slice(0, 19))}</span>
+    </div>
+    ${e.detail ? `<div class="faint" style="padding-left:86px;font-size:10.5px;color:var(--red)">${esc(e.detail.slice(0, 200))}</div>` : ''}
+  `).join('');
+}
+
 VIEWS.produzione = async () => {
-  const r = await call('production_preview');
+  const [r, piecesRes] = await Promise.all([call('production_preview'), call('list_content_pieces', null, null, 20)]);
   const meta = state.meta;
   const capCards = meta.content_types.map((ct) => `<div class="card">
     <div class="row"><b>${CT_LABELS[ct]}</b><div class="spacer"></div><span class="badge green">Pronto</span></div>
@@ -319,9 +332,36 @@ VIEWS.produzione = async () => {
       </div>
     </div></div></div>`;
   }
+
+  let piecesHtml = '<div class="empty">Nessun pezzo prodotto finora.</div>';
+  if (piecesRes.ok && piecesRes.pieces.length) {
+    const rows = await Promise.all(piecesRes.pieces.map(async (p) => {
+      const expanded = state.expandedPieceId === p.id;
+      let timelineHtml = '';
+      if (expanded) {
+        const t = await call('piece_timeline', p.id);
+        timelineHtml = t.ok ? timelineRows(t.events) : `<div class="empty">${esc(t.error)}</div>`;
+      }
+      return `<div class="card" style="margin-bottom:8px">
+        <div class="row" data-action="piece-toggle-timeline" data-id="${p.id}" style="cursor:pointer">
+          <span class="dc-dot" style="background:${CT_COLORS[p.content_type] || '#4c8bf5'};width:9px;height:9px;border-radius:50%;flex-shrink:0"></span>
+          <div><div class="p-name">${CT_LABELS[p.content_type] || esc(p.content_type)} · #${p.id}</div>
+            <div class="faint">${esc(p.profile_nome || '—')}</div></div>
+          <div class="spacer"></div>
+          ${p.cost_credits_actual != null ? `<span class="faint num" style="margin-right:10px">${fmt(p.cost_credits_actual)} CR</span>` : ''}
+          <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span>
+        </div>
+        ${expanded ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">${timelineHtml}</div>` : ''}
+      </div>`;
+    }));
+    piecesHtml = rows.join('');
+  }
+
   return head('Produzione', 'Centro operativo della produzione') + hero + `
     <div class="section-title">Capacità di produzione</div>
-    <div class="grid cols-3">${capCards}</div>`;
+    <div class="grid cols-3">${capCards}</div>
+    <div class="section-title">Pezzi recenti (clicca per la timeline a checkpoint)</div>
+    ${piecesHtml}`;
 };
 
 /* ============ Vista: Libreria ============ */
@@ -598,6 +638,11 @@ const ACTIONS = {
       refreshBalance();
       setView('produzione');
     } else toast(r.error, 'err');
+  },
+  'piece-toggle-timeline': (el) => {
+    const id = Number(el.dataset.id);
+    state.expandedPieceId = state.expandedPieceId === id ? null : id;
+    setView('produzione');
   },
   'backlog-filter': (el) => { state.backlogFilter = el.dataset.status; setView('backlog'); },
   'backlog-add': async () => {

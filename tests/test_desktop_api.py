@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from aicraft.budget import ledger
 from aicraft.db.base import Base
-from aicraft.db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
+from aicraft.db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
 from aicraft.desktop import api as api_mod
 from aicraft.production import higgsfield_client
 from aicraft.reference_sync import sync as reference_sync
@@ -494,3 +494,53 @@ def test_open_reference_folder_rifiuta_percorso_fuori_media_dir(api, monkeypatch
 
     assert r["ok"] is False
     assert "sicurezza" in r["error"]
+
+
+def test_list_content_pieces_filtra_per_stato(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        session.add_all([
+            ContentPiece(profile=profile, content_type="carosello", status="delivered", cost_credits_actual=0.36),
+            ContentPiece(profile=profile, content_type="video_talking", status="error"),
+        ])
+        session.commit()
+
+    tutti = api.list_content_pieces()
+    assert len(tutti["pieces"]) == 2
+
+    consegnati = api.list_content_pieces(status="delivered")
+    assert len(consegnati["pieces"]) == 1
+    assert consegnati["pieces"][0]["content_type"] == "carosello"
+    assert consegnati["pieces"][0]["profile_nome"] == "Ruby"
+    assert consegnati["pieces"][0]["cost_credits_actual"] == 0.36
+
+
+def test_piece_timeline_ritorna_eventi_in_ordine(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        session.add(piece)
+        session.commit()
+        session.add_all([
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="started"),
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="completed", duration_seconds=1.5),
+        ])
+        session.commit()
+        piece_id = piece.id
+
+    r = api.piece_timeline(piece_id)
+
+    assert r["ok"]
+    assert r["piece"]["id"] == piece_id
+    assert [e["status"] for e in r["events"]] == ["started", "completed"]
+    assert r["events"][1]["duration_seconds"] == 1.5
+
+
+def test_piece_timeline_id_inesistente(api):
+    r = api.piece_timeline(999)
+    assert r["ok"] is False
+    assert "inesistente" in r["error"]

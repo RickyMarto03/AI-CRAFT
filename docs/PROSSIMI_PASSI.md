@@ -27,19 +27,19 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Tutti i 7 punti della vecchia checklist "100% operativo" sono FATTI** (vedi checklist sotto,
-tutti [x]). L'utente ha chiesto esplicitamente il prossimo blocco di lavoro (15/07/2026 sera):
-arricchire l'app con piu' osservabilita' e funzionalita', a partire da:
-1. **Tracking a checkpoint per la produzione** (PRIORITARIO, richiesto esplicitamente): oggi
-   `ContentPiece.status` cambia stadio per stadio ma non lascia una traccia storica con
-   timestamp — non si vede quanto ci ha messo ogni stadio o dove si e' bloccato un pezzo. Serve
-   una tabella di log eventi (piece_id, stadio, timestamp, esito/durata) scritta ad ogni
-   transizione in `engine.process_content_piece`, + vista timeline per pezzo in "Produzione".
-2. Dopo il tracking, arricchire (in quest'ordine di priorita' scelto dall'utente): **Produzione**
-   (timeline/retry singolo pezzo/dettaglio errori — naturale seguito del punto 1), **Piano**
-   (storico versioni, duplicazione settimana precedente, vista mensile), **Creator/Libreria**
-   (statistiche per categoria/performance nel tempo), **Costi** (storico movimenti nel tempo,
-   grafico spesa per tipo, proiezione mensile).
+**Tracking a checkpoint FATTO** (15/07/2026 sera, vedi doc §18): tabella `ContentPieceEvent`,
+endpoint `list_content_pieces`/`piece_timeline`, sezione "Pezzi recenti" con timeline espandibile
+in Produzione.
+
+**Prossimo, nell'ordine di priorita' scelto dall'utente** (non ancora iniziato):
+1. **Produzione**: retry singolo pezzo fallito direttamente dalla UI (oggi solo `references
+   sync`/`retry_reference` per le reference, non c'e' un "riprova questo pezzo" per un
+   ContentPiece in errore), dettaglio errori piu' ricco (gia' visibile in parte nella timeline).
+2. **Piano**: storico versioni piano, duplicazione settimana precedente, vista mensile oltre alla
+   settimanale.
+3. **Creator/Libreria**: statistiche per categoria/performance reference nel tempo.
+4. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
+   proiezione consumo mensile.
 
 ## Intenzioni discusse in chat, non ancora implementate
 
@@ -76,6 +76,22 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 sera, parte 3 (sessione Claude — tracking a checkpoint)
+
+- Richiesto dall'utente mentre il test reale girava in background: vedere a checkpoint come
+  procede una produzione (scaricato, prompt scritto, generato...), non solo lo status finale.
+- Nuova tabella `ContentPieceEvent` (stage, status started/completed/failed, duration_seconds,
+  detail, timestamp), scritta da `engine.process_content_piece` ad ogni inizio/fine stadio.
+  Attenzione gestita: il rollback su fallimento (che scarta stati parziali, comportamento
+  esistente) avviene PRIMA di registrare l'evento "failed", altrimenti l'evento committerebbe
+  anche lo stato parziale che il rollback doveva scartare.
+- API: `list_content_pieces`, `piece_timeline`. UI: sezione "Pezzi recenti" in Produzione con
+  timeline espandibile per pezzo (click per aprire/chiudere).
+- 171 test verdi. Vedi doc §18.
+- L'utente ha anche dato le priorita' per il prossimo blocco di arricchimento (Produzione, Piano,
+  Creator/Libreria, Costi, in quest'ordine) — non ancora iniziato, vedi "Task su cui lavorare
+  adesso" sopra.
 
 ### 15/07/2026 sera, parte 2 (sessione Claude — punti 3+5 checklist, primo test reale)
 

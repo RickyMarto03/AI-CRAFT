@@ -10,6 +10,7 @@ di Reference Sync.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..budget import ledger
-from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
+from ..db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
 from ..reference_sync import allocator
 from . import carousel_selection, character, claude_creative, delivery, frame_picker, higgsfield_client, pipeline_spec, qa, settings
 
@@ -76,6 +77,23 @@ def _log_credit(session: Session, piece: ContentPiece, credits: float, motivo: s
     # (regola ferma CLAUDE.md sui crediti).
     ledger.record_consumption(session, credits=credits, motivo=motivo, content_piece_id=piece.id)
     piece.cost_credits_actual = (piece.cost_credits_actual or 0.0) + abs(credits)
+
+
+def _record_event(
+    session: Session, piece: ContentPiece, stage: str, status: str,
+    *, duration_seconds: Optional[float] = None, detail: Optional[str] = None,
+) -> None:
+    """Traccia inizio/fine di uno stadio (checkpoint), richiesto
+    dall'utente (15/07/2026) per vedere a che punto e' un pezzo, quanto ci
+    ha messo ogni stadio, e dove si e' eventualmente bloccato — invece di
+    vedere solo lo status finale. Commit immediato (non solo flush) cosi'
+    l'UI puo' vedere "in corso" mentre uno stadio lungo sta ancora girando
+    in un altro processo/sessione. Vedi docs/ai-craft-architecture.md §18."""
+    session.add(ContentPieceEvent(
+        content_piece_id=piece.id, stage=stage, status=status,
+        duration_seconds=duration_seconds, detail=(detail[:500] if detail else None),
+    ))
+    session.commit()
 
 
 def _localize_asset(piece: ContentPiece, url: str, *, kind: str, index: int = 1) -> str:
@@ -288,9 +306,25 @@ def process_content_piece(session: Session, piece: ContentPiece) -> None:
         for stage in stages:
             piece.status = stage
             session.commit()
-            _STAGE_FUNCS[stage](session, piece, reference, profile)
+            _record_event(session, piece, stage, "started")
+            stage_start = time.monotonic()
+            try:
+                _STAGE_FUNCS[stage](session, piece, reference, profile)
+            except Exception as exc:
+                # Scarta PRIMA le modifiche parziali dello stadio fallito
+                # (stesso comportamento di sempre: un rollback isolato, non
+                # tutto-o-niente sull'intero pezzo) e SOLO DOPO registra
+                # l'evento — altrimenti il commit dell'evento salverebbe
+                # anche lo stato a meta' (es. asset generati solo in parte
+                # su un carosello multi-foto), cosa che il rollback nei
+                # blocchi except sotto era pensato per evitare.
+                session.rollback()
+                _record_event(session, piece, stage, "failed", duration_seconds=time.monotonic() - stage_start, detail=str(exc))
+                raise
+            _record_event(session, piece, stage, "completed", duration_seconds=time.monotonic() - stage_start)
             session.commit()
         piece.status = "delivered"
+        _record_event(session, piece, "delivered", "completed")
         session.commit()
     except higgsfield_client.HiggsfieldNSFWBlockedError:
         # Esito legittimo e non recuperabile con un retry (stesso input ->

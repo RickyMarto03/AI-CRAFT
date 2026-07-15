@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from aicraft.db.base import Base
-from aicraft.db.models import ContentPiece, Creator, CreditLedger, PlanWeek, Profile, ReferenceItem
+from aicraft.db.models import ContentPiece, ContentPieceEvent, Creator, CreditLedger, PlanWeek, Profile, ReferenceItem
 from aicraft.production import engine as engine_module
 from aicraft.production.higgsfield_client import GenerationResult
 
@@ -143,6 +143,19 @@ def test_process_content_piece_video_talking_end_to_end(session, tmp_path, monke
     assert (delivered_folder / "caption.txt").read_text() == "Caption finta"
     assert (delivered_folder / "meta.json").exists()
     assert any(f.suffix == ".mp4" for f in delivered_folder.iterdir())
+
+    events = session.query(ContentPieceEvent).filter_by(content_piece_id=piece.id).order_by(ContentPieceEvent.id).all()
+    seen = [(e.stage, e.status) for e in events]
+    assert seen == [
+        ("image_regen", "started"), ("image_regen", "completed"),
+        ("video_regen", "started"), ("video_regen", "completed"),
+        ("qa", "started"), ("qa", "completed"),
+        ("caption_hashtag", "started"), ("caption_hashtag", "completed"),
+        ("delivery", "started"), ("delivery", "completed"),
+        ("delivered", "completed"),
+    ]
+    completed_stage_events = [e for e in events if e.status == "completed" and e.stage != "delivered"]
+    assert all(e.duration_seconds is not None and e.duration_seconds >= 0 for e in completed_stage_events)
 
 
 def test_process_content_piece_qa_fallito_marca_errore(session, monkeypatch):
@@ -348,6 +361,13 @@ def test_video_troppo_lungo_scartato_senza_spendere_nulla(session, tmp_path, mon
 
     assert piece.status == "too_long"
     assert calls["n"] == 0  # niente chiamata Claude: scartato prima, non spreca nulla
+
+    events = session.query(ContentPieceEvent).filter_by(content_piece_id=piece.id).order_by(ContentPieceEvent.id).all()
+    seen = [(e.stage, e.status) for e in events]
+    assert seen == [("image_regen", "started"), ("image_regen", "failed")]
+    failed_event = events[-1]
+    assert failed_event.duration_seconds is not None and failed_event.duration_seconds >= 0
+    assert "supera il limite" in failed_event.detail
 
 
 def test_video_entro_soglia_procede_normalmente(session, tmp_path, monkeypatch):

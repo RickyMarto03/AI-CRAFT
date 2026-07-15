@@ -129,6 +129,26 @@ class ContentPiece(Base):
     ledger_entries: Mapped[list["CreditLedger"]] = relationship(back_populates="content_piece")
 
 
+class ContentPieceEvent(Base):
+    """Log storico degli stadi di un ContentPiece durante la produzione, con
+    timestamp e durata. Non nel blueprint originale: aggiunto su richiesta
+    dell'utente (15/07/2026) — prima si vedeva solo lo status corrente, non
+    quanto ci ha messo ogni stadio o dove un pezzo si e' eventualmente
+    bloccato. Scritto da engine.process_content_piece ad ogni inizio/fine
+    stadio, non modificabile da altrove. Vedi docs/ai-craft-architecture.md
+    §18."""
+
+    __tablename__ = "content_piece_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_piece_id: Mapped[int] = mapped_column(ForeignKey("content_pieces.id"))
+    stage: Mapped[str]  # "image_regen" | "video_regen" | "qa" | "caption_hashtag" | "delivery" | "delivered"
+    status: Mapped[str]  # "started" | "completed" | "failed"
+    detail: Mapped[Optional[str]]  # messaggio d'errore/nota, solo su "failed"
+    duration_seconds: Mapped[Optional[float]]  # valorizzato solo su "completed"/"failed"
+    timestamp: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
+
+
 class PlanWeek(Base):
     __tablename__ = "plan_weeks"
 

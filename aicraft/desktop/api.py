@@ -25,7 +25,7 @@ from ..budget import ledger as budget_ledger
 from ..budget import sync as budget_sync
 from ..budget.errors import BudgetInsufficientError
 from ..db.base import SessionLocal, init_db
-from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
+from ..db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
 from ..planning import plan as planning
 from ..planning.quota import GIORNI_VALIDI
 from ..production import engine as production_engine
@@ -463,6 +463,49 @@ class Api:
             return {"ok": False, "error": "Budget insufficiente per avviare la produzione reale.", **preview}
         result = production_engine.run_once(session, plan_id=(int(plan_id) if plan_id is not None else None))
         return {"preview_before": preview, "production": result}
+
+    @_endpoint
+    def list_content_pieces(self, session, status=None, plan_id=None, limit=30):
+        q = session.query(ContentPiece)
+        if status:
+            q = q.filter(ContentPiece.status == status)
+        if plan_id is not None:
+            q = q.filter(ContentPiece.plan_week_id == int(plan_id))
+        pieces = q.order_by(ContentPiece.updated_at.desc()).limit(int(limit)).all()
+        return {"pieces": [
+            {
+                "id": p.id,
+                "content_type": p.content_type,
+                "status": p.status,
+                "profile_nome": p.profile.nome if p.profile else None,
+                "cost_credits_actual": p.cost_credits_actual,
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            }
+            for p in pieces
+        ]}
+
+    @_endpoint
+    def piece_timeline(self, session, piece_id):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        events = (
+            session.query(ContentPieceEvent)
+            .filter(ContentPieceEvent.content_piece_id == piece.id)
+            .order_by(ContentPieceEvent.id)
+            .all()
+        )
+        return {
+            "piece": {"id": piece.id, "content_type": piece.content_type, "status": piece.status},
+            "events": [
+                {
+                    "stage": e.stage, "status": e.status,
+                    "duration_seconds": e.duration_seconds, "detail": e.detail,
+                    "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                }
+                for e in events
+            ],
+        }
 
     # --- backlog (Da migliorare) ---
 

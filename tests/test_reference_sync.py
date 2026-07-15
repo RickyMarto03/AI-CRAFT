@@ -197,3 +197,43 @@ def test_retry_all_lista_vuota_non_esplode(monkeypatch, tmp_path):
     monkeypatch.setattr(sync, "init_db", lambda: None)
 
     assert sync.retry_all([]) == {"total": 0, "ready": 0, "still_failed": 0}
+
+
+def test_retry_stale_errors_ritenta_solo_i_falliti_vecchi(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry5.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    now = dt.datetime.utcnow()
+    with TestSession() as session:
+        vecchio = ReferenceItem(source_url="https://www.instagram.com/p/OLD/", status="download_error")
+        recente = ReferenceItem(source_url="https://www.instagram.com/p/NEW/", status="download_error")
+        non_fallito = ReferenceItem(source_url="https://www.instagram.com/p/READY/", status="ready")
+        session.add_all([vecchio, recente, non_fallito])
+        session.commit()
+        # forza updated_at (onupdate non scatta sull'insert iniziale)
+        vecchio.error_message = "x"
+        recente.error_message = "x"
+        session.commit()
+        vecchio_id, recente_id = vecchio.id, recente.id
+
+    # vecchio: fallito 10 giorni fa (fuori dalla finestra di 3gg -> ritentabile)
+    # recente: fallito 1 giorno fa (dentro la finestra -> NON ritentabile)
+    with TestSession() as session:
+        session.query(ReferenceItem).filter_by(id=vecchio_id).update({"updated_at": now - dt.timedelta(days=10)})
+        session.query(ReferenceItem).filter_by(id=recente_id).update({"updated_at": now - dt.timedelta(days=1)})
+        session.commit()
+
+    seen_ids = []
+
+    def fake_retry_reference(reference_id):
+        seen_ids.append(reference_id)
+        return {"id": reference_id, "status": "ready", "error_message": None}
+
+    monkeypatch.setattr(sync, "retry_reference", fake_retry_reference)
+
+    result = sync.retry_stale_errors(older_than_days=3)
+
+    assert seen_ids == [vecchio_id]
+    assert result["total"] == 1
+    assert result["older_than_days"] == 3

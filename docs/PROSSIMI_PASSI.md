@@ -28,7 +28,9 @@ dover rileggere un'intera chat che non ha mai visto.
 ## Task su cui lavorare adesso
 
 **Fatto**: i 4 blocchi di arricchimento (§18-§21), sync massivo ultime 2 settimane reali (255
-link, 170 pronte), redesign Libreria con thumbnail reali + sezione "Contenuti generati" (§22).
+link, 170 pronte), redesign Libreria con thumbnail reali + sezione "Contenuti generati" (§22),
+riprova tutti/andamento leggibile/fix scroll (§23), ricerca+paginazione Libreria, retry
+automatico stale, prompt Claude in inglese, regola confine filesystem (§24).
 
 **L'utente ha confermato che il workflow di generazione per caroselli e video talking è
 "perfetto"** (visto sui 2 output reali del test §17) — non serve piu' lavorarci sopra a meno di
@@ -85,6 +87,29 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 notte, parte 3 (sessione Claude — ricerca/paginazione Libreria, retry stale, prompt in inglese, confine filesystem)
+
+- Implementate le 3 mini-feature proposte a fine sessione precedente e confermate dall'utente:
+  ricerca testuale in Libreria (caption/URL, case-insensitive), paginazione oltre i 50 risultati
+  (`LIB_PAGE_SIZE`), retry automatico settimanale dei `download_error` piu' vecchi di N giorni
+  (`sync.retry_stale_errors`, agganciato a `run_policy_once`/scheduler). Estratta `ERROR_STATUSES`
+  come costante unica in `sync.py` (stesso pattern di fix gia' visto con `RETRYABLE_STATUSES`).
+- **Tradotti in inglese** i prompt Claude per generazione/analisi foto e video
+  (`write_talking_video_prompt`, `_generate_scene_descriptions`/`write_carousel_prompts`, incluse
+  tutte le varianti condizionali e i messaggi di retry) — richiesta esplicita dell'utente, Claude
+  rende meglio in inglese. Lasciati in italiano di proposito i prompt di caption/hashtag (non sono
+  foto/video). Test aggiornati alle nuove stringhe inglesi.
+- **Nuova regola ferma**: durante il lavoro su questo progetto, lettura/scrittura file confinata
+  dentro AI-CRAFT (o internet), mai altrove sul Mac dell'utente. Scritta in `CLAUDE.md` (visibile
+  anche a Codex) e in memoria persistente Claude.
+- 195 test verdi. Vedi doc §24.
+- **Nota per la prossima sessione**: la cartella `~/Desktop/REVISIONE_TEST_talking_balletti_15-07-2026/`
+  (creata PRIMA della nuova regola, vedi punto 3 della checklist sotto) e' rimasta fuori da
+  AI-CRAFT — da chiedere all'utente se va spostata dentro il progetto o lasciata dov'e'.
+- **Prossimo passo esplicito, ancora MAI ESEGUITO**: generare su scala reale con le 170 reference
+  pronte — l'utente ha detto di essere pronto, ma va concordato quanti pezzi/che tipo/budget prima
+  di lanciare (vedi sotto).
 
 ### 15/07/2026 notte, parte 2 (sessione Claude — riprova tutti, andamento, fix scroll)
 

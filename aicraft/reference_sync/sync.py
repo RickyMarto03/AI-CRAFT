@@ -44,6 +44,20 @@ RETRYABLE_STATUSES = (
     "transcribing",
 )
 
+# Sottoinsieme di RETRYABLE_STATUSES che rappresenta un fallimento vero e
+# proprio (non "mai ancora provato" come pending/downloading/transcribing).
+# Unica fonte di verita' condivisa con la UI (prima duplicata come
+# `_ERROR_STATUSES` in desktop/api.py — stesso principio del fix sopra:
+# tenerla in un solo posto evita che le due viste si disallineino su quali
+# stati contano come errore).
+ERROR_STATUSES = (
+    "error",
+    "download_error",
+    "private",
+    "unavailable",
+    "transcription_error",
+)
+
 
 @dataclass(frozen=True)
 class SyncPolicyItem:
@@ -315,6 +329,30 @@ def retry_all(reference_ids: list) -> dict:
     return {"total": len(reference_ids), "ready": ready, "still_failed": still_failed}
 
 
+def retry_stale_errors(*, older_than_days: int = 3) -> dict:
+    """Ritenta automaticamente le reference fallite (`ERROR_STATUSES`) non
+    toccate da almeno `older_than_days` giorni — pensata per lo scheduler
+    settimanale, richiesto dall'utente (15/07/2026): un fallimento
+    transitorio (rate-limit/timeout Instagram) spesso si risolve da solo
+    col tempo, ha senso ritentarlo automaticamente invece di lasciarlo
+    bloccato finche' l'operatore non lo nota a mano in Libreria. Le
+    reference fallite di recente (entro la finestra) NON vengono
+    ritoccate, per non insistere a raffica sulla stessa reference appena
+    fallita."""
+    init_db()
+    cutoff = dt.datetime.utcnow() - dt.timedelta(days=older_than_days)
+    with SessionLocal() as session:
+        ids = list(session.scalars(
+            select(ReferenceItem.id).where(
+                ReferenceItem.status.in_(ERROR_STATUSES),
+                ReferenceItem.updated_at <= cutoff,
+            )
+        ))
+    result = retry_all(ids)
+    result["older_than_days"] = older_than_days
+    return result
+
+
 def run_once(
     year: int | None = None,
     *,
@@ -371,7 +409,7 @@ def run_once(
         }
 
 
-def run_policy_once(year: int | None = None, *, policy: str | None = None) -> dict:
+def run_policy_once(year: int | None = None, *, policy: str | None = None, retry_stale_after_days: int | None = 3) -> dict:
     init_db()
     year = year or dt.date.today().year
     today = dt.date.today()
@@ -412,9 +450,20 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None) -> di
                 "processed": len(candidates),
             })
 
-        return {
+        result = {
             "sheet_refs": len(refs),
             "processed": processed,
             "cleanup_deleted": cleanup_count,
             "policy": by_policy,
         }
+
+    # Fuori dal `with` sopra: retry_stale_errors gestisce la propria sessione
+    # (stesso motivo per cui non e' contato nei limiti per-categoria della
+    # policy: e' una preoccupazione distinta — "riprova i vecchi falliti",
+    # non "scarica altro materiale nuovo" — quindi non deve competere per
+    # gli stessi slot). Richiesto dall'utente (15/07/2026) per lo scheduler
+    # settimanale: un fallimento transitorio spesso si risolve da solo col
+    # tempo, ha senso ritentarlo automaticamente.
+    if retry_stale_after_days is not None:
+        result["retry_stale"] = retry_stale_errors(older_than_days=retry_stale_after_days)
+    return result

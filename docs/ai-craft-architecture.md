@@ -815,3 +815,40 @@ Tre rifiniture puntuali su feedback dell'utente dopo il redesign Libreria.
 **Test**: `test_reference_sync.py` (`retry_all` rispetta l'ordine e conta gli esiti, lista vuota
 non esplode), `test_desktop_api.py` (`retry_all_references` filtra per stato ritentabile e per
 categoria). 191 test verdi in tutto il progetto.
+
+## 24. Ricerca/paginazione Libreria, retry automatico stale, prompt Claude in inglese — FATTO (15/07/2026, sessione Claude)
+
+Tre mini-feature proposte dopo il §23 e confermate dall'utente, piu' una richiesta separata di
+traduzione dei prompt.
+
+- **Ricerca testuale in Libreria**: `_list_references(search=...)` filtra per substring
+  case-insensitive su `original_caption` o `source_url`. Endpoint `list_references` accetta ora
+  anche `search`/`offset` e ritorna `{"references", "total", "offset", "limit"}` invece di una
+  lista semplice. UI: campo ricerca con Invio-per-cercare, pulsante Pulisci.
+- **Paginazione oltre i 50 risultati**: `LIB_PAGE_SIZE = 50` lato frontend, `state.libFilter.page`
+  resettato a 0 a ogni cambio filtro/ricerca. Controlli prev/next con conteggio "X–Y di Z".
+- **Retry automatico dei falliti vecchi**: `sync.retry_stale_errors(older_than_days=3)` ritenta
+  automaticamente le reference in `ERROR_STATUSES` non toccate da almeno N giorni — estratta
+  `ERROR_STATUSES` come costante unica in `sync.py` (prima era duplicata localmente in
+  `api.py` come `_ERROR_STATUSES`, stesso pattern di disallineamento gia' visto con
+  `RETRYABLE_STATUSES`). Agganciato a `run_policy_once()` (quindi gira anche nello scheduler
+  settimanale LaunchAgent), CLI `references sync-policy` stampa il riepilogo.
+- **Prompt Claude tradotti in inglese**: su richiesta esplicita dell'utente ("Claude è più
+  efficace in inglese"), tradotto il testo istruzione (non solo l'output atteso) dei prompt che
+  Claude legge per generazione/analisi foto e video: `write_talking_video_prompt` (incluse le
+  varianti `reference_clause` e `transcript_block`) e `_generate_scene_descriptions`/
+  `write_carousel_prompts` (incluse le 3 varianti di `feedback` nei retry). **Fuori scope
+  volutamente**: `write_caption_and_hashtags`/`adapt_original_caption_and_hashtags` restano in
+  italiano — non sono prompt di generazione/analisi foto o video, sono adattamento testo caption.
+  I commenti/docstring del codice restano in italiano (convenzione di progetto), solo il testo
+  che Claude riceve e' cambiato.
+- **Regola confine filesystem** (vedi anche `CLAUDE.md`): qualunque lettura/scrittura di file
+  durante il lavoro su questo progetto resta dentro la cartella AI-CRAFT (o internet), mai altrove
+  sul Mac dell'utente salvo indicazione esplicita puntuale.
+
+**Test**: `test_desktop_api.py` (ricerca per caption/URL case-insensitive, paginazione),
+`test_reference_sync.py` (`retry_stale_errors` ritenta solo i falliti piu' vecchi del cutoff,
+backdatando `updated_at` via update SQL diretto perche' `onupdate` non scatta sull'insert
+iniziale), `test_claude_creative.py` (asserzioni sui prompt aggiornate ai nuovi testi inglesi:
+`"ONLY as a reference for movement"`, `"No video reference is passed to the model"`,
+`"EXACT TIMESTAMPS"`). 195 test verdi in tutto il progetto.

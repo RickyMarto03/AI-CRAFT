@@ -205,6 +205,12 @@ def cmd_references_sync_policy(session, args):
     )
     if rows:
         print(f"Dettaglio policy: {rows}")
+    retry_stale = result.get("retry_stale")
+    if retry_stale:
+        print(
+            f"Retry automatico falliti vecchi (>{retry_stale['older_than_days']}gg): "
+            f"{retry_stale['ready']}/{retry_stale['total']} tornate pronte."
+        )
 
 
 def cmd_produce(session, args):

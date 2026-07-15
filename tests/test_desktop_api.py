@@ -397,9 +397,9 @@ def test_backlog_set_status_e_filtro(api):
     assert len(tutte["notes"]) == 2
 
 
-def _seed_reference(status="ready", category="BOOBS", local_video_path=None, frame_paths=None, downloaded_at=None):
+def _seed_reference(status="ready", category="BOOBS", local_video_path=None, frame_paths=None, downloaded_at=None, original_caption=None, source_url=None):
     return ReferenceItem(
-        source_url=f"https://www.instagram.com/p/{status}-{category}/",
+        source_url=source_url or f"https://www.instagram.com/p/{status}-{category}/",
         source_tab="CAROSELLI",
         source_category=category,
         content_type_hint="carosello",
@@ -407,6 +407,7 @@ def _seed_reference(status="ready", category="BOOBS", local_video_path=None, fra
         local_video_path=local_video_path,
         frame_paths=frame_paths or [],
         downloaded_at=downloaded_at,
+        original_caption=original_caption,
     )
 
 
@@ -429,6 +430,50 @@ def test_list_references_filtra_per_stato_e_categoria(api):
     solo_boobs_ready = api.list_references(status="ready", category="BOOBS")
     assert len(solo_boobs_ready["references"]) == 1
     assert solo_boobs_ready["references"][0]["source_category"] == "BOOBS"
+
+
+def test_list_references_ricerca_per_caption(api):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="ready", category="BOOBS", original_caption="Just for curiosity"),
+            _seed_reference(status="ready", category="BOOTY", original_caption="Dance with me tonight"),
+        ])
+        session.commit()
+
+    r = api.list_references(search="curiosity")
+
+    assert r["ok"]
+    assert len(r["references"]) == 1
+    assert r["references"][0]["original_caption"] == "Just for curiosity"
+
+
+def test_list_references_ricerca_per_url_case_insensitive(api):
+    with api_mod.SessionLocal() as session:
+        session.add(_seed_reference(status="ready", source_url="https://www.instagram.com/p/AbCdEfG123/"))
+        session.commit()
+
+    r = api.list_references(search="abcdefg")
+
+    assert r["ok"]
+    assert len(r["references"]) == 1
+
+
+def test_list_references_paginazione(api):
+    with api_mod.SessionLocal() as session:
+        for i in range(5):
+            session.add(_seed_reference(status="ready", source_url=f"https://www.instagram.com/p/PAGE{i}/"))
+        session.commit()
+
+    prima = api.list_references(limit=2, offset=0)
+    seconda = api.list_references(limit=2, offset=2)
+
+    assert prima["ok"] and seconda["ok"]
+    assert prima["total"] == 5
+    assert len(prima["references"]) == 2
+    assert len(seconda["references"]) == 2
+    id_prima = {r["id"] for r in prima["references"]}
+    id_seconda = {r["id"] for r in seconda["references"]}
+    assert id_prima.isdisjoint(id_seconda)  # pagine diverse, nessuna sovrapposizione
 
 
 def test_retry_reference_chiama_reference_sync(api, monkeypatch):

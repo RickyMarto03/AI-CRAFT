@@ -1,7 +1,7 @@
 'use strict';
 
 /* ============ Bridge & stato ============ */
-const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '' }, expandedPieceId: null, showMonthly: false };
+const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '', search: '', page: 0 }, expandedPieceId: null, showMonthly: false };
 
 async function call(method, ...args) {
   try {
@@ -456,11 +456,13 @@ function thumbBox(url, fallbackLetter, size) {
   return `<div class="p-avatar" style="width:${size}px;height:${size}px;flex-shrink:0">${esc(fallbackLetter || '?')}</div>`;
 }
 
+const LIB_PAGE_SIZE = 50;
+
 VIEWS.libreria = async () => {
-  const filter = state.libFilter || { status: '', category: '' };
+  const filter = state.libFilter || { status: '', category: '', search: '', page: 0 };
   const [r, listed, trend, generated] = await Promise.all([
     call('reference_stats'),
-    call('list_references', filter.status || null, filter.category || null, 50),
+    call('list_references', filter.status || null, filter.category || null, filter.search || null, LIB_PAGE_SIZE, (filter.page || 0) * LIB_PAGE_SIZE),
     call('reference_weekly_trend', 8),
     call('list_content_pieces', null, null, 20),
   ]);
@@ -532,14 +534,31 @@ VIEWS.libreria = async () => {
     <div class="card">${weeklyTrendRows(trend)}</div>
     <div class="section-title">Contenuti generati (ultimi 20)</div>
     <div class="plist">${generatedRows}</div>
-    <div class="section-title">Reference scaricate (filtrabili)</div>
+    <div class="section-title">Reference scaricate (filtrabili, cercabili)</div>
     <div class="row wrap" style="margin-bottom:12px">
       <select id="libFilterStatus" data-change="lib-filter-status">${statusOpts}</select>
       <select id="libFilterCategory" data-change="lib-filter-category">${categoryOpts}</select>
+      <input id="libSearchInput" placeholder="Cerca per caption o URL…" value="${esc(filter.search || '')}" style="flex:1;min-width:200px" data-keydown="lib-search-enter" />
+      <button class="btn sm" data-action="lib-search">Cerca</button>
+      ${filter.search ? '<button class="btn sm" data-action="lib-search-clear">Pulisci</button>' : ''}
     </div>
     <div class="plist">${filteredRows}</div>
+    ${listedPagination(listed, filter)}
     <div class="faint" style="margin-top:12px">Finestra pesca: ultime ${r.selection_weeks} settimane · pulizia reference IG dopo ${r.retention_days} giorni.</div>`;
 };
+
+function listedPagination(listed, filter) {
+  if (!listed.ok || !listed.total) return '';
+  const page = filter.page || 0;
+  const totalPages = Math.max(1, Math.ceil(listed.total / LIB_PAGE_SIZE));
+  const from = listed.total === 0 ? 0 : page * LIB_PAGE_SIZE + 1;
+  const to = Math.min(listed.total, (page + 1) * LIB_PAGE_SIZE);
+  return `<div class="row" style="margin-top:12px;justify-content:center;gap:14px">
+    <button class="btn sm" data-action="lib-page-prev" ${page <= 0 ? 'disabled' : ''}>‹ Precedente</button>
+    <span class="faint num">${from}–${to} di ${listed.total}</span>
+    <button class="btn sm" data-action="lib-page-next" ${page >= totalPages - 1 ? 'disabled' : ''}>Successiva ›</button>
+  </div>`;
+}
 
 /* ============ Vista: Costi ============ */
 VIEWS.costi = async () => {
@@ -811,6 +830,24 @@ const ACTIONS = {
     state.expandedPieceId = state.expandedPieceId === id ? null : id;
     setView('produzione');
   },
+  'lib-search': () => {
+    const value = ($('#libSearchInput')?.value || '').trim();
+    state.libFilter.search = value;
+    state.libFilter.page = 0;
+    setView('libreria');
+  },
+  'lib-search-clear': () => {
+    state.libFilter.search = '';
+    state.libFilter.page = 0;
+    setView('libreria');
+  },
+  'lib-page-prev': () => {
+    if ((state.libFilter.page || 0) > 0) { state.libFilter.page -= 1; setView('libreria'); }
+  },
+  'lib-page-next': () => {
+    state.libFilter.page = (state.libFilter.page || 0) + 1;
+    setView('libreria');
+  },
   'backlog-filter': (el) => { state.backlogFilter = el.dataset.status; setView('backlog'); },
   'backlog-add': async () => {
     const category = $('#newBacklogCategory').value.trim() || 'generico';
@@ -854,9 +891,13 @@ document.addEventListener('change', async (e) => {
     return;
   }
   const libStatus = e.target.closest('[data-change="lib-filter-status"]');
-  if (libStatus) { state.libFilter.status = libStatus.value; setView('libreria'); return; }
+  if (libStatus) { state.libFilter.status = libStatus.value; state.libFilter.page = 0; setView('libreria'); return; }
   const libCategory = e.target.closest('[data-change="lib-filter-category"]');
-  if (libCategory) { state.libFilter.category = libCategory.value; setView('libreria'); }
+  if (libCategory) { state.libFilter.category = libCategory.value; state.libFilter.page = 0; setView('libreria'); }
+});
+document.addEventListener('keydown', (e) => {
+  const el = e.target.closest('[data-keydown="lib-search-enter"]');
+  if (el && e.key === 'Enter') { ACTIONS['lib-search'](); }
 });
 
 /* ============ Avvio ============ */

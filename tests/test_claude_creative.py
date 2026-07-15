@@ -220,8 +220,8 @@ def test_write_talking_video_prompt_menziona_uso_video_reference_solo_se_attivo(
         source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
     )
 
-    assert "SOLO come riferimento di movimento" in seen_prompts[0]
-    assert "Non c'e' nessun video di riferimento" in seen_prompts[1]
+    assert "ONLY as a reference for movement" in seen_prompts[0]
+    assert "No video reference is passed to the model" in seen_prompts[1]
 
 
 def test_write_talking_video_prompt_usa_timestamp_segmenti_quando_presenti(monkeypatch):
@@ -246,10 +246,10 @@ def test_write_talking_video_prompt_usa_timestamp_segmenti_quando_presenti(monke
         duration_seconds=5.0, use_video_reference=False,
     )
 
-    assert "TIMESTAMP ESATTI" in seen_prompts[0]
+    assert "EXACT TIMESTAMPS" in seen_prompts[0]
     assert "0.0s" in seen_prompts[0] and "2.1s" in seen_prompts[0]
     assert "[0.0s]" in seen_prompts[0]  # timestamp del frame stesso, non solo dei segmenti
-    assert "TIMESTAMP ESATTI" not in seen_prompts[1]  # senza segmenti: degrada al comportamento precedente
+    assert "EXACT TIMESTAMPS" not in seen_prompts[1]  # senza segmenti: degrada al comportamento precedente
 
 
 def test_adapt_original_caption_and_hashtags_parsa_json(monkeypatch):

@@ -168,70 +168,68 @@ def write_talking_video_prompt(
             f"- [{s['start']:.1f}s–{s['end']:.1f}s] ‘{s['text'].strip()}’" for s in transcript_segments
         )
         transcript_block = (
-            f"Segmenti della trascrizione CON TIMESTAMP ESATTI (usa questi secondi per capire quale frame "
-            f"corrisponde a quale frase — non indovinare l'allineamento, i numeri sopra i frame e qui sotto sono "
-            f"nella stessa scala temporale del video originale):\n{segments_list}\n\n"
-            f"Trascrizione completa in un unico blocco, come riferimento:\n\"\"\"\n{transcript.strip()}\n\"\"\""
+            f"Transcript segments WITH EXACT TIMESTAMPS (use these seconds to figure out which frame "
+            f"corresponds to which line — don't guess the alignment, the numbers above the frames and "
+            f"below here are on the same time scale as the original video):\n{segments_list}\n\n"
+            f"Full transcript as a single block, for reference:\n\"\"\"\n{transcript.strip()}\n\"\"\""
         )
     else:
         transcript_block = (
-            f"Questa e' la trascrizione ESATTA di cio' che dice la persona nel video (senza timestamp per "
-            f"segmento disponibili: deduci l'allineamento con i frame dall'ordine e dal contenuto):\n\"\"\"\n"
+            f"This is the EXACT transcript of what the person says in the video (no per-segment "
+            f"timestamps available: infer the alignment with the frames from order and content):\n\"\"\"\n"
             f"{transcript.strip()}\n\"\"\""
         )
 
     if use_video_reference:
         reference_clause = (
-            "Il video originale verra' passato al modello SOLO come riferimento di movimento/inquadratura/ritmo "
-            "della camera — NON deve influenzare aspetto fisico, outfit, colori o identita': quelli vengono SOLO "
-            "dalla foto di riferimento fornita a parte. Scrivi la sezione REFERENCE USAGE dichiarando "
-            "esplicitamente questo: identita'/outfit/aspetto dalla foto di riferimento, movimento/framing dal "
-            "video di riferimento, senza ridisegnare personaggio o ambientazione."
+            "The original video will be passed to the model ONLY as a reference for movement/framing/"
+            "camera pacing — it must NOT influence physical appearance, outfit, colors, or identity: "
+            "those come ONLY from the reference photo provided separately. Write the REFERENCE USAGE "
+            "section stating this explicitly: identity/outfit/appearance from the reference photo, "
+            "movement/framing from the reference video, without redesigning the character or the setting."
         )
     else:
         reference_clause = (
-            "Non c'e' nessun video di riferimento passato al modello, solo la foto. Scrivi la sezione REFERENCE "
-            "USAGE dichiarando che identita'/outfit/ambientazione vengono dalla foto di riferimento, e descrivi TU "
-            "a parole, con precisione, ogni movimento di camera/corpo/mani/testa osservato nei frame: e' l'unico "
-            "modo in cui il modello sapra' come muoversi."
+            "No video reference is passed to the model, only the photo. Write the REFERENCE USAGE "
+            "section stating that identity/outfit/setting come from the reference photo, and YOU "
+            "describe in words, precisely, every camera/body/hand/head movement observed in the "
+            "frames: it's the only way the model will know how to move."
         )
 
     prompt = (
-        f"Guarda con attenzione questi {len(frames)} frame campionati lungo l'intero video originale, ciascuno "
-        f"etichettato col secondo esatto in cui compare nel video (usa lo strumento di lettura file, sono "
-        f"immagini):\n{paths_list}\n\n"
-        f"E' un video Instagram di tipo '{content_type}' (categoria '{source_category}'), durata originale "
-        f"{duration_seconds:.1f} secondi. {transcript_block}\n\n"
-        "Scrivi UN prompt cinematografico completo in inglese per rigenerare questo video con un nuovo modello, "
-        "seguendo questa struttura (stesso formato di prompt reali gia' usati con successo su questa "
-        "piattaforma):\n\n"
+        f"Carefully look at these {len(frames)} frames sampled across the entire original video, each "
+        f"labeled with the exact second it appears at in the video (use the file-reading tool, they are "
+        f"images):\n{paths_list}\n\n"
+        f"This is an Instagram video of type '{content_type}' (category '{source_category}'), original "
+        f"duration {duration_seconds:.1f} seconds. {transcript_block}\n\n"
+        "Write ONE complete cinematic prompt to regenerate this video with a new model, following this "
+        "structure (same format as real prompts already used successfully on this platform):\n\n"
         f"REFERENCE USAGE: {reference_clause}\n\n"
-        "STYLE: stile visivo generale osservato nei frame (es. selfie smartphone realistico, inquadratura, "
-        "ambiente/luce).\n\n"
-        "ACTION/PERFORMANCE: descrivi i movimenti di corpo/mani/testa/sguardo ed espressioni facciali osservati "
-        "nei frame, collegandoli ALLE FRASI ESATTE del dialogo (cita la frase tra virgolette singole, poi descrivi "
-        "il movimento che l'accompagna) — usa i timestamp di frame e segmenti per abbinare con precisione quale "
-        "frase viene detta in quale momento/frame, invece di indovinare dall'ordine. Segui l'ordine del dialogo "
-        "dall'inizio alla fine.\n\n"
-        "CAMERA: posizione/movimento della camera osservato nei frame (es. camera fissa smartphone, leggero "
-        "movimento a mano, nessun taglio se i frame mostrano continuita').\n\n"
-        f"PACING: ritmo per stare in {duration_seconds:.1f} secondi totali, dichiara esplicitamente la durata nel "
-        "testo (es. 'Create a X-second single continuous take...').\n\n"
-        "DIALOGUE AND AUDIO: riporta il dialogo tra virgolette singole nell'ordine esatto della trascrizione "
-        "fornita sopra — puoi correggere SOLO refusi evidenti di trascrizione automatica (ripetizioni per errore, "
-        "'ehm' isolati), NON puoi cambiare il significato, l'ordine, o aggiungere frasi che non ci sono nella "
-        "trascrizione. Specifica tono vocale e ritmo di consegna.\n\n"
-        "CONSTRAINTS: nessun taglio di montaggio (single continuous shot) salvo che i frame mostrino chiaramente "
-        "il contrario, nessuno zoom innaturale, nessun testo/sottotitoli/loghi/watermark in sovrimpressione, "
-        "nessuna musica di sottofondo, nessun dialogo diverso da quello fornito, nessun errore di sincronismo "
-        "labiale.\n\n"
-        "Scrivi in modo denso e concreto (fatti visivi precisi, non prosa atmosferica). NON includere descrizioni "
-        "fisiche della persona (viso, corpo, capelli, colore pelle, outfit): quelle vengono aggiunte separatamente "
-        "in codice, tu scrivi solo le sezioni sopra.\n\n"
-        "IMPORTANTE per il formato: se devi citare una scritta/testo visibile nei frame o nel dialogo, usa le "
-        "virgolette singole 'cosi'', mai le virgolette doppie.\n\n"
-        "Rispondi SOLO con il testo del prompt finale (le sezioni sopra, con le intestazioni in maiuscolo come "
-        "negli esempi reali), nessun commento, nessun markdown."
+        "STYLE: overall visual style observed in the frames (e.g. realistic smartphone selfie, framing, "
+        "environment/lighting).\n\n"
+        "ACTION/PERFORMANCE: describe the body/hand/head/gaze movements and facial expressions observed "
+        "in the frames, tying them to the EXACT DIALOGUE LINES (quote the line in single quotes, then "
+        "describe the movement that accompanies it) — use the frame and segment timestamps to precisely "
+        "match which line is said at which moment/frame, instead of guessing from order. Follow the "
+        "dialogue order from start to finish.\n\n"
+        "CAMERA: camera position/movement observed in the frames (e.g. fixed smartphone camera, slight "
+        "handheld movement, no cuts if the frames show continuity).\n\n"
+        f"PACING: pacing to fit within {duration_seconds:.1f} seconds total, explicitly state the "
+        "duration in the text (e.g. 'Create a X-second single continuous take...').\n\n"
+        "DIALOGUE AND AUDIO: report the dialogue in single quotes in the exact order of the transcript "
+        "provided above — you may correct ONLY obvious automatic-transcription glitches (mistaken "
+        "repetitions, isolated filler sounds), you may NOT change the meaning, the order, or add lines "
+        "that aren't in the transcript. Specify vocal tone and delivery pace.\n\n"
+        "CONSTRAINTS: no editing cuts (single continuous shot) unless the frames clearly show otherwise, "
+        "no unnatural zooms, no on-screen text/subtitles/logos/watermarks, no background music, no "
+        "dialogue other than what was provided, no lip-sync errors.\n\n"
+        "Write densely and concretely (precise visual facts, not atmospheric prose). Do NOT include "
+        "physical descriptions of the person (face, body, hair, skin color, outfit): those are added "
+        "separately in code, you only write the sections above.\n\n"
+        "IMPORTANT for formatting: if you need to quote text/writing visible in the frames or in the "
+        "dialogue, use single quotes 'like this', never double quotes.\n\n"
+        "Reply ONLY with the final prompt text (the sections above, with uppercase headings as in the "
+        "real examples), no comments, no markdown."
     )
 
     scene = _strip_markdown_fence(run_headless(prompt, allowed_tools=["Read"]).strip())
@@ -361,43 +359,47 @@ def _generate_scene_descriptions(
         budget_bg = mid - budget_outfit - budget_pose - budget_expr
 
         prompt = (
-            f"Guarda con attenzione, una per una, queste {len(photo_paths)} foto (usa lo strumento di lettura "
-            f"file per aprirle, sono immagini):\n{paths_list}\n\n"
-            f"Fanno parte dello stesso carosello Instagram (categoria '{source_category}', tipo '{content_type}'). "
-            "Per CIASCUNA foto, nell'ordine dato, scrivi una descrizione fotorealistica per RICREARE ESATTAMENTE "
-            "quella foto — non un'interpretazione generica dello stile, la riproduzione fedele di quella foto "
-            "specifica. Scrivi in modo denso e diretto: fatti concreti e identificativi (colori esatti, punti "
-            "precisi di posa/espressione), non prosa atmosferica o aggettivi ridondanti — ogni parola deve "
-            "aiutare a ricreare la foto, non descriverne l'atmosfera. In quest'ordine, con questo budget di "
-            f"caratteri indicativo per parte (totale ~{mid}):\n"
-            f"1. OUTFIT (~{budget_outfit} caratteri): colore ESATTO di ogni capo (usa il nome piu' preciso "
-            "possibile, es. 'rosa cipria' non 'rosa'), tessuto, taglio, dettagli essenziali (bottoni, stampe, "
-            "accessori, gioielli) — elenca i fatti, senza descriverne l'effetto o la sensazione.\n"
-            f"2. POSA (~{budget_pose} caratteri): posizione ESATTA del corpo in quella foto — angolazione di "
-            "testa/busto/bacino, dove sono braccia e mani (cosa toccano, aperte o chiuse), posizione delle "
-            "gambe, direzione dello sguardo. Fatti, non atmosfera.\n"
-            f"3. ESPRESSIONE (~{budget_expr} caratteri): occhi aperti o chiusi e direzione, tipo di sorriso "
-            "(bocca chiusa/aperta, denti visibili o no), sopracciglia, inclinazione testa.\n"
-            f"4. BACKGROUND (~{budget_bg} caratteri): solo gli elementi visivi essenziali e identificativi "
-            "(ambiente, 2-3 oggetti chiave, tipo di luce) — non un elenco esaustivo di tutto cio' che si vede.\n\n"
-            "Le foto sono dello stesso servizio fotografico: se outfit e background sono uguali o simili tra "
-            "le foto, descrivili in modo coerente tra loro (stessi colori, stesso ambiente); la POSA e "
-            "l'ESPRESSIONE invece cambiano quasi sempre da una foto all'altra, descrivi quelle specifiche di "
-            "ogni foto senza copiarle dalle altre.\n\n"
-            f"Il TOTALE di ogni descrizione deve stare tra {target_min} e {target_max} caratteri: i budget per "
-            "parte sopra sono una guida per restare in questo range, non un obbligo rigido punto per punto — "
-            "conta che il totale sia giusto. Se rischi di sforare, taglia aggettivi ridondanti prima di tagliare "
-            "fatti concreti (colori/posizioni). NON usare comandi o strumenti per contare i caratteri mentre "
-            "scrivi (es. bash/wc): non sono disponibili in questa modalita' e il tentativo blocca la risposta.\n\n"
-            "NON includere descrizioni fisiche della persona (viso, corpo, capelli, colore pelle): quelle "
-            "vengono aggiunte separatamente, tu descrivi solo outfit/posa/espressione/background.\n\n"
-            "IMPORTANTE per il formato: se devi citare una scritta/logo/testo visibile in foto, NON usare mai "
-            "le virgolette doppie \" — usa le virgolette singole 'cosi'' oppure descrivi la scritta a parole, "
-            "altrimenti rompi il JSON della risposta.\n\n"
+            f"Carefully look at these {len(photo_paths)} photos, one at a time (use the file-reading "
+            f"tool to open them, they are images):\n{paths_list}\n\n"
+            f"They are part of the same Instagram carousel (category '{source_category}', type "
+            f"'{content_type}'). For EACH photo, in the given order, write a photorealistic "
+            "description to RECREATE THAT EXACT PHOTO — not a generic interpretation of the style, a "
+            "faithful reproduction of that specific photo. Write densely and directly: concrete, "
+            "identifying facts (exact colors, precise pose/expression points), not atmospheric prose "
+            "or redundant adjectives — every word must help recreate the photo, not describe its "
+            "mood. In this order, with this rough character budget per section "
+            f"(total ~{mid}):\n"
+            f"1. OUTFIT (~{budget_outfit} characters): EXACT color of each garment (use the most "
+            "precise name possible, e.g. 'dusty pink' not 'pink'), fabric, cut, essential details "
+            "(buttons, prints, accessories, jewelry) — list the facts, don't describe their effect "
+            "or feel.\n"
+            f"2. POSE (~{budget_pose} characters): EXACT body position in that photo — head/torso/"
+            "hip angle, where the arms and hands are (what they touch, open or closed), leg "
+            "position, gaze direction. Facts, not mood.\n"
+            f"3. EXPRESSION (~{budget_expr} characters): eyes open or closed and their direction, "
+            "type of smile (mouth closed/open, teeth visible or not), eyebrows, head tilt.\n"
+            f"4. BACKGROUND (~{budget_bg} characters): only the essential, identifying visual "
+            "elements (setting, 2-3 key objects, type of light) — not an exhaustive list of "
+            "everything visible.\n\n"
+            "The photos are from the same photoshoot: if outfit and background are the same or "
+            "similar across photos, describe them consistently (same colors, same setting); POSE "
+            "and EXPRESSION instead almost always change from one photo to another, describe each "
+            "photo's specific ones without copying from the others.\n\n"
+            f"The TOTAL length of each description must be between {target_min} and {target_max} "
+            "characters: the per-section budgets above are a guide to stay in this range, not a "
+            "strict rule per point — what matters is that the total is right. If you risk going "
+            "over, cut redundant adjectives before cutting concrete facts (colors/positions). Do "
+            "NOT use commands or tools to count characters while writing (e.g. bash/wc): they are "
+            "not available in this mode and trying will block the response.\n\n"
+            "Do NOT include physical descriptions of the person (face, body, hair, skin color): "
+            "those are added separately, you only describe outfit/pose/expression/background.\n\n"
+            "IMPORTANT for formatting: if you need to quote text/a logo/writing visible in the "
+            "photo, NEVER use double quotes \" — use single quotes 'like this' or describe the "
+            "text in words instead, otherwise you'll break the JSON of the response.\n\n"
             f"{feedback}"
-            "Rispondi SOLO con un JSON valido nella forma esatta "
-            '{"scenes": ["<descrizione foto 1>", "<descrizione foto 2>", ...]}, '
-            "un elemento per foto, nello stesso ordine dato sopra. Nessun altro testo, nessun markdown."
+            "Reply ONLY with valid JSON in the exact form "
+            '{"scenes": ["<photo 1 description>", "<photo 2 description>", ...]}, '
+            "one element per photo, in the same order given above. No other text, no markdown."
         )
         raw = _strip_markdown_fence(run_headless(prompt, allowed_tools=["Read"]).strip())
 
@@ -413,9 +415,9 @@ def _generate_scene_descriptions(
             if attempt == _MAX_SCENE_RETRIES:
                 raise ClaudeCreativeError(f"Scene carosello non in formato JSON atteso: {raw[:300]!r}")
             feedback = (
-                "Il tentativo precedente non era JSON valido (potresti aver provato a usare uno strumento non "
-                "disponibile, es. per contare i caratteri — non farlo, stima la lunghezza da solo). "
-                "Rispondi SOLO con il JSON richiesto, nessun altro testo.\n\n"
+                "The previous attempt was not valid JSON (you may have tried to use a tool that "
+                "isn't available, e.g. to count characters — don't, just estimate the length "
+                "yourself). Reply ONLY with the requested JSON, no other text.\n\n"
             )
             continue
 
@@ -424,7 +426,7 @@ def _generate_scene_descriptions(
             if attempt == _MAX_SCENE_RETRIES:
                 raise ClaudeCreativeError(f"JSON scene carosello incompleto o con numero sbagliato di elementi: {data}")
             n = len(scenes) if isinstance(scenes, list) else "formato errato"
-            feedback = f"Il tentativo precedente aveva {n} elementi, ne servono esattamente {len(photo_paths)}, uno per foto.\n\n"
+            feedback = f"The previous attempt had {n} elements, exactly {len(photo_paths)} are needed, one per photo.\n\n"
             continue
 
         lengths = [len(str(s)) for s in scenes]
@@ -439,10 +441,11 @@ def _generate_scene_descriptions(
             )
             return [str(s) for s in scenes]
 
-        detail = ", ".join(f"foto {i + 1}: {lengths[i]} caratteri" for i in out_of_range)
+        detail = ", ".join(f"photo {i + 1}: {lengths[i]} characters" for i in out_of_range)
         feedback = (
-            f"Il tentativo precedente aveva descrizioni fuori target ({detail}; target: {target_min}-{target_max} "
-            "caratteri ciascuna). Riscrivi TUTTE le descrizioni rispettando il target di lunghezza.\n\n"
+            f"The previous attempt had descriptions outside the target ({detail}; target: "
+            f"{target_min}-{target_max} characters each). Rewrite ALL the descriptions respecting "
+            "the length target.\n\n"
         )
 
     raise ClaudeCreativeError("Impossibile generare le scene del carosello")  # unreachable

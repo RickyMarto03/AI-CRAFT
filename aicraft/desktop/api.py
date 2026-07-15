@@ -137,21 +137,30 @@ def _today_agenda(session) -> dict:
     }
 
 
-def _list_references(session, *, status=None, category=None, limit=50) -> list:
-    """Lista filtrabile di reference per la Libreria (a differenza di
-    `_reference_stats`, che ritorna solo aggregati + le 10 piu' recenti).
-    Stesso criterio di ordinamento di `_reference_stats` (piu' recenti
-    prima, per coerenza)."""
+def _list_references(session, *, status=None, category=None, search=None, limit=50, offset=0) -> dict:
+    """Lista filtrabile/cercabile/paginata di reference per la Libreria (a
+    differenza di `_reference_stats`, che ritorna solo aggregati + le 10
+    piu' recenti). Stesso criterio di ordinamento di `_reference_stats`
+    (piu' recenti prima, per coerenza). `search` cerca per sottostringa
+    (case-insensitive) in caption originale o URL — filtro in Python, non
+    SQL LIKE: la libreria ha qualche migliaio di righe al massimo, non
+    serve un indice full-text per questa scala."""
     q = session.query(ReferenceItem)
     if status:
         q = q.filter(ReferenceItem.status == status)
     if category:
         q = q.filter(ReferenceItem.source_category == category)
-    rows = sorted(q.all(), key=lambda r: r.downloaded_at or r.imported_at, reverse=True)[:limit]
-    result = []
-    for r in rows:
+    rows = q.all()
+    if search:
+        needle = search.strip().lower()
+        rows = [r for r in rows if needle in (r.original_caption or "").lower() or needle in r.source_url.lower()]
+    rows = sorted(rows, key=lambda r: r.downloaded_at or r.imported_at, reverse=True)
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    items = []
+    for r in page:
         thumb = _reference_thumbnail(r)
-        result.append({
+        items.append({
             "id": r.id,
             "url": r.source_url,
             "status": r.status,
@@ -166,7 +175,7 @@ def _list_references(session, *, status=None, category=None, limit=50) -> list:
             "thumbnail_url": f"file://{thumb}" if thumb else None,
             "error_message": r.error_message,
         })
-    return result
+    return {"items": items, "total": total, "offset": offset, "limit": limit}
 
 
 def _reference_folder(item: ReferenceItem) -> Path | None:
@@ -217,7 +226,7 @@ def _piece_thumbnail(piece: ContentPiece) -> Path | None:
     return None
 
 
-_ERROR_STATUSES = ("error", "download_error", "private", "unavailable", "transcription_error")
+_ERROR_STATUSES = reference_sync.ERROR_STATUSES  # unica fonte di verita' in reference_sync.sync
 
 
 def _reference_weekly_trend(session, *, weeks: int = 8) -> list:
@@ -495,8 +504,9 @@ class Api:
         return stats
 
     @_endpoint
-    def list_references(self, session, status=None, category=None, limit=50):
-        return {"references": _list_references(session, status=status, category=category, limit=int(limit))}
+    def list_references(self, session, status=None, category=None, search=None, limit=50, offset=0):
+        result = _list_references(session, status=status, category=category, search=search, limit=int(limit), offset=int(offset))
+        return {"references": result["items"], "total": result["total"], "offset": result["offset"], "limit": result["limit"]}
 
     @_endpoint
     def reference_weekly_trend(self, session, weeks=8):

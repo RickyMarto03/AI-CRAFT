@@ -11,6 +11,20 @@ problemi di qualita' segnalati durante generazioni reali.
 
 ---
 
+## REGOLA FISSA — non rimuovere questa sezione
+
+**Ogni agente che lavora su questo progetto (Claude, Codex, o altro) DEVE aggiornare questo
+file quando i token/il budget della sessione stanno per esaurirsi, PRIMA dell'ultimo commit
+della sessione.** Aggiornamento = aggiungere una nuova voce in cima a "Log sessioni" sotto
+(senza cancellare le voci precedenti) + tenere allineate "Task su cui lavorare adesso",
+"Intenzioni discusse in chat, non ancora implementate" e la checklist piu' sotto allo stato
+reale. Questa regola e la sua descrizione non vanno mai rimosse o riscritte in modo piu'
+debole, anche quando si aggiorna il resto del file — e' l'unico modo per cui, quando un altro
+agente (umano o AI) riprende il progetto, puo' vedere cosa e' stato fatto nel frattempo senza
+dover rileggere un'intera chat che non ha mai visto.
+
+---
+
 ## Task su cui lavorare adesso
 
 **Punto 6 della checklist sotto: rifiniture UI dell'app desktop.** Deciso con l'utente il
@@ -58,7 +72,9 @@ esistenti per lo stile).
        "error") — proposto, mai confermato in scope dall'utente.
 6. [ ] **Rifiniture UI — vedi "Task su cui lavorare adesso" sopra. PROSSIMO TASK.**
 
-## Report ultima sessione (15/07/2026)
+## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 (sessione Claude)
 
 - Aggiunta sezione "Da migliorare" (backlog) nell'app desktop: modello `ImprovementNote`,
   modulo `aicraft/backlog.py`, 3 endpoint API, tab UI dedicato con filtro stato. Popolata con
@@ -70,3 +86,4 @@ esistenti per lo stile).
 - Repo git inizializzato per la prima volta, primo commit fatto, push su
   `https://github.com/RickyMarto03/AI-CRAFT.git` (branch `main`) verificato allineato.
 - 125 test verdi. Doc `docs/ai-craft-architecture.md` aggiornata (§12.15, §12.13, §13).
+- Creato questo file (`PROSSIMI_PASSI.md`) come handoff permanente tra sessioni/agenti.

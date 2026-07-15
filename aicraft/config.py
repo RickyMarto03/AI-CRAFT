@@ -46,6 +46,11 @@ REFERENCE_SYNC_POLICY = os.getenv(
 # --- Whisper (trascrizione locale) ---
 WHISPER_MODEL_SIZE = os.getenv("AICRAFT_WHISPER_MODEL", "small")
 
+# Soglia sotto la quale la UI mostra un avviso di saldo basso (Home/Costi) —
+# richiesto dall'utente (15/07/2026) per accorgersi subito, non solo
+# guardando il numero in Costi.
+BUDGET_ALERT_THRESHOLD = float(os.getenv("AICRAFT_BUDGET_ALERT_THRESHOLD", "50"))
+
 # --- Production Engine ---
 DELIVERY_DIR = Path(os.getenv("AICRAFT_DELIVERY_DIR", DATA_DIR / "delivery"))
 DELIVERY_DIR.mkdir(parents=True, exist_ok=True)

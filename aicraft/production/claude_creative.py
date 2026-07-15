@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 _MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```\s*$", re.DOTALL)
 
+# Aggiunta al prompt SOLO quando si ritenta un pezzo che era stato rifiutato
+# da Claude per policy di contenuto (ContentPiece.was_refused, vedi
+# engine.retry_content_piece) — richiesto dall'utente (15/07/2026) invece di
+# ripetere lo stesso identico input, che darebbe di nuovo lo stesso rifiuto.
+_REFUSAL_RETRY_CLAUSE = (
+    "IMPORTANT: a previous attempt at this same content was refused by content policy. "
+    "Reformulate more conservatively this time: avoid explicit or extreme close-up sexualized "
+    "descriptions, keep clothing/poses/expressions tasteful and general rather than explicit, "
+    "while still following the structure and constraints above.\n\n"
+)
+
 
 def _strip_markdown_fence(text: str) -> str:
     """Claude a volte avvolge il JSON in un blocco markdown ```json ... ```
@@ -128,6 +139,7 @@ def write_talking_video_prompt(
     duration_seconds: float,
     use_video_reference: bool,
     transcript_segments: Optional[list] = None,
+    avoid_refusal: bool = False,
 ) -> str:
     """Prompt cinematografico completo per seedance_2_0 (video_talking/
     video_caption). Sostituisce il vecchio `write_regen_prompt` (troppo
@@ -228,6 +240,7 @@ def write_talking_video_prompt(
         "separately in code, you only write the sections above.\n\n"
         "IMPORTANT for formatting: if you need to quote text/writing visible in the frames or in the "
         "dialogue, use single quotes 'like this', never double quotes.\n\n"
+        f"{_REFUSAL_RETRY_CLAUSE if avoid_refusal else ''}"
         "Reply ONLY with the final prompt text (the sections above, with uppercase headings as in the "
         "real examples), no comments, no markdown."
     )
@@ -315,7 +328,9 @@ def _assemble_full_prompt(character, scene_description: str) -> str:
     )
 
 
-def write_carousel_prompts(*, photo_paths: list, character, content_type: str, source_category: str = "") -> list:
+def write_carousel_prompts(
+    *, photo_paths: list, character, content_type: str, source_category: str = "", avoid_refusal: bool = False
+) -> list:
     """Un prompt di ricostruzione fotorealistica per ciascuna foto in
     `photo_paths` (fino a 3, gia' selezionate da carousel_selection.py).
 
@@ -341,14 +356,17 @@ def write_carousel_prompts(*, photo_paths: list, character, content_type: str, s
         source_category=source_category,
         target_min=scene_min,
         target_max=scene_max,
+        avoid_refusal=avoid_refusal,
     )
     return [_assemble_full_prompt(character, scene) for scene in scenes]
 
 
 def _generate_scene_descriptions(
-    *, photo_paths: list, content_type: str, source_category: str, target_min: int, target_max: int
+    *, photo_paths: list, content_type: str, source_category: str, target_min: int, target_max: int,
+    avoid_refusal: bool = False,
 ) -> list:
     paths_list = "\n".join(f"- {p}" for p in photo_paths)
+    avoid_clause = _REFUSAL_RETRY_CLAUSE if avoid_refusal else ""
     feedback = ""
 
     for attempt in range(_MAX_SCENE_RETRIES + 1):
@@ -396,7 +414,7 @@ def _generate_scene_descriptions(
             "IMPORTANT for formatting: if you need to quote text/a logo/writing visible in the "
             "photo, NEVER use double quotes \" — use single quotes 'like this' or describe the "
             "text in words instead, otherwise you'll break the JSON of the response.\n\n"
-            f"{feedback}"
+            f"{avoid_clause}{feedback}"
             "Reply ONLY with valid JSON in the exact form "
             '{"scenes": ["<photo 1 description>", "<photo 2 description>", ...]}, '
             "one element per photo, in the same order given above. No other text, no markdown."

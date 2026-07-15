@@ -888,3 +888,110 @@ reference esaurita, `retry_stale_errors` la esclude dalla query), `test_desktop_
 (`retry_all_references` esclude le esaurite, `list_references` espone `download_attempts`/
 `max_download_attempts`/`retryable`, `reference_stats` espone `error_retryable`). 201 test verdi
 in tutto il progetto.
+
+## 26. 21 mini-feature richieste dall'utente in blocco — FATTO (15/07/2026, sessione Claude)
+
+Dopo una lista di 22 proposte (vedi conversazione), l'utente ha chiesto di implementarle tutte
+tranne l'export CSV. Elenco per area, con le decisioni di scope prese durante l'implementazione:
+
+**Reference/Libreria**
+- **Import manuale di un link IG** (`reference_sync.import_single_reference`): crea/riusa una
+  `ReferenceItem` con settimana = settimana corrente e scarica subito (stesso `process_item` del
+  sync normale, NON tocca lo Sheet). UI: form in Libreria (URL/tab/categoria/tipo).
+- **Avviso su URL duplicati tra tab/categoria** (`upsert_reference(..., conflicts=[])`): quando lo
+  stesso URL cambia tab/categoria da un sync all'altro (probabile errore nello sheet), viene
+  loggato e raccolto in `category_conflicts` nel risultato del sync — prima si risolveva in
+  silenzio (l'ultimo giro vince). Toast dopo "Aggiorna libreria" se `category_conflicts` non e'
+  vuoto.
+- **Pulizia automatica delle thumbnail orfane**: `cleanup_old_references` ora elimina anche il
+  file `<video>_thumb.jpg` in cache (generato da `_reference_thumbnail`) insieme al video quando
+  la reference esce per retention — prima restava orfano su disco.
+
+**Produzione/qualita'**
+- **Retry singolo pezzo** (`production_engine.retry_content_piece`): azzera asset/caption/hashtag
+  e riparte da `image_regen` per UN ContentPiece, senza rilanciare l'intero piano. Rifiuta
+  (`ValueError`) su un pezzo gia' `delivered`. UI: bottone "Riprova" sui pezzi in stato di
+  fallimento (`error`/`blocked_nsfw`/`too_long`/`content_refused`).
+- **Retry con feedback mirato sui rifiuti Claude**: nuova colonna `ContentPiece.was_refused`
+  (migrazione additiva), impostata a `True` quando `process_content_piece` cattura
+  `ClaudeContentRefusedError`, azzerata al successivo `delivered`. `write_talking_video_prompt`/
+  `write_carousel_prompts` accettano `avoid_refusal: bool` e, se `True`, appendono
+  `_REFUSAL_RETRY_CLAUSE` (istruzione in inglese a riformulare in modo piu' conservativo) —
+  `engine.py` la passa sempre come `piece.was_refused`, cosi' un retry su un pezzo rifiutato non
+  ripete identico l'input che ha gia' causato il rifiuto.
+- **QA visivo in-app (lightbox)**: `_reference_preview`/`_piece_preview` in `api.py` calcolano
+  `(preview_kind, preview_url)` — video reali per i video (non solo il frame thumbnail), foto a
+  piena risoluzione per gli altri. UI: click su una thumbnail (Libreria, Produzione) apre un
+  overlay con `<img>`/`<video controls>`, chiusura su click fuori o sulla X.
+  Il vecchio `thumbBox()` accetta ora 2 parametri opzionali per abilitarlo.
+- **Voto qualita' manuale 1-5**: nuova colonna `ContentPiece.quality_rating`, endpoint
+  `set_piece_quality` (valida 1-5). UI: select sui pezzi `delivered`, badge a stelle in Libreria.
+  Puro dato osservativo, nessuna logica automatica lo usa.
+- **Coda di produzione riordinabile**: nuova colonna `ContentPiece.priority` (default 0 =
+  comportamento FIFO invariato), `run_once` ora ordina `ORDER BY priority DESC, id`. Endpoint
+  `bump_piece_priority` porta un pezzo a `max(priority)+1`. UI: bottone "Metti in cima alla coda"
+  sui pezzi non ancora prodotti.
+- **Simulazione "dry-run"**: `_production_preview` ora include anche `pieces` (dettaglio per
+  singolo pezzo: content_type/categoria reference/costo stimato), non solo il totale aggregato —
+  zero chiamate reali, stesso principio di prima. UI: toggle "Vedi dettaglio pezzi" in Produzione.
+- **Preview allocator prima di Approva**: `_plan_allocation_preview` simula
+  `assign_references_to_plan` SENZA persistere nulla (riusa `allocator.select_candidates`, una
+  query pura), mostra quali reference verrebbero scelte. Endpoint `plan_allocation_preview`. UI:
+  toggle "Anteprima assegnazione" in Piano.
+- **Statistiche tempo medio per stadio**: `_stage_duration_stats` aggrega
+  `ContentPieceEvent.duration_seconds` (solo eventi `completed`) per stage. UI: tile in Produzione.
+
+**Costi/budget**
+- **Alert soglia budget**: nuovo `config.BUDGET_ALERT_THRESHOLD` (default 50), esposto in
+  `reporting.overview()` e in `budget_status` come `budget_alert`/`budget_alert_threshold`. UI:
+  banner in Oggi e Costi quando il saldo scende sotto soglia.
+- **Confronto costo stimato vs reale**: `_cost_estimate_vs_actual` aggrega per content_type solo i
+  pezzi con ENTRAMBI `cost_credits_estimated`/`cost_credits_actual` valorizzati (somma/delta/%).
+  Endpoint `cost_estimate_vs_actual`. UI: sezione dedicata in Costi.
+
+**Robustezza/manutenzione**
+- **Backup automatico del DB**: nuovo modulo `aicraft/backup.py` (`run_backup`/`run_backup_safe`,
+  copia `data/aicraft.db` in `data/backups/` con timestamp, tiene solo gli ultimi
+  `MAX_BACKUPS=14`). Agganciato PRIMA di `run_policy_once` (sync settimanale via scheduler) e
+  PRIMA di `production_run` (produzione reale) con `run_backup_safe` (non blocca l'operazione
+  principale se il backup fallisce). Endpoint manuale `run_backup` (usa `run_backup`, non la
+  versione "safe": un fallimento su richiesta esplicita deve essere visibile). UI: bottone
+  "Backup DB ora" in Sistema.
+- **Log scheduler settimanale in UI**: `_scheduler_status` legge i file gia' scritti da
+  `aicraft.cli references sync-policy` (`data/logs/weekly-reference-sync.{out,err}.log`, vedi
+  `scheduler.py`) — ultimo timestamp + tail 20 righe, niente di nuovo da loggare. UI: sezione in
+  Sistema.
+- **Versioning del character**: nuova tabella `CharacterVersion` (append-only). Il character
+  RESTA una costante di codice (`character.py`, decisione gia' presa e documentata li'), non
+  editabile da UI — `character.record_versions_if_changed(session)` snapshotta ogni
+  `CharacterProfile` solo se diverso dall'ultimo registrato per quella creator, chiamata da
+  `desktop.api.get_api()` a ogni avvio dell'app (costo trascurabile, scrive solo quando cambia
+  davvero qualcosa). Endpoint `character_history`. UI: storico in Sistema.
+
+**Ricerca**
+- **Ricerca globale cross-tab**: `_global_search` cerca in reference (caption/URL), pezzi generati
+  (caption) e backlog (titolo/descrizione) con `ILIKE`, 20 risultati per sezione. UI: campo nella
+  topbar con pannello a comparsa, click su un risultato passa alla tab pertinente (Libreria/
+  Backlog) — non fa deep-link alla riga esatta, tenuto volutamente semplice.
+- **Ricerca/filtro nel backlog**: `backlog.list_notes(..., search=...)`, stesso pattern ILIKE.
+
+**Configurazione**
+- **Health-check credenziali all'avvio**: `_health_check()` — SOLO controlli locali senza rete
+  (`shutil.which` sui binari CLI, esistenza del file service account Google): niente
+  `higgsfield account status` reale, troppo lento/fragile per un check a ogni avvio. Endpoint
+  `health_check`. UI: badge in Sistema, banner in Oggi se qualcosa manca.
+- **Timeline unificata "oggi"**: `_today_events` — TUTTI gli eventi `ContentPieceEvent` di oggi su
+  tutti i profili (a differenza di `_today_agenda`, che mostra solo cosa e' PIANIFICATO per il
+  profilo attivo). Endpoint `today_events`. UI: nuova sezione "Attivita' di oggi" in Oggi.
+- **Dashboard "Salute pipeline"**: la vista "Oggi" esistente e' stata arricchita con banner
+  budget/health-check e la timeline eventi sopra — niente nuova tab, per non frammentare
+  ulteriormente la navigazione.
+
+**Migrazione DB**: 3 nuove colonne additive su `content_pieces` (`was_refused` BOOLEAN,
+`quality_rating` INTEGER, `priority` INTEGER, con backfill a 0/False per le righe esistenti) e una
+nuova tabella `character_versions` (creata automaticamente da `create_all`, non serve backfill).
+
+**Test**: 236 test verdi in tutto il progetto (35 nuovi rispetto a §25), coprono ogni endpoint e
+funzione nuova elencata sopra, inclusi i casi di errore (rating fuori range, retry su pezzo
+consegnato, backup senza DB reale). Verificata anche la migrazione contro il DB reale del
+progetto (colonne aggiunte, tabella creata, primo snapshot character scritto al primo avvio).

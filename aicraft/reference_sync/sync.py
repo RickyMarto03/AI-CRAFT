@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import config
+from .. import backup, config
 from ..db.base import SessionLocal, init_db
 from ..db.models import ContentPiece, ReferenceItem
 from . import downloader, transcriber
@@ -141,11 +141,34 @@ def parse_sync_policy(policy: str | None = None) -> list[SyncPolicyItem]:
     return items
 
 
-def upsert_reference(session: Session, ref: SheetReference) -> ReferenceItem:
+def upsert_reference(session: Session, ref: SheetReference, *, conflicts: list | None = None) -> ReferenceItem:
+    """`conflicts`, se passata, viene arricchita quando lo stesso URL
+    compare nello sheet sotto un tab/categoria diverso da quello gia'
+    salvato — richiesto dall'utente (15/07/2026): oggi questo caso veniva
+    risolto in silenzio (l'ultimo giro di sync vince, il precedente sparisce
+    senza traccia), un URL duplicato per errore tra due tab/categorie
+    poteva far "sballare" la categoria di una reference ad ogni sync senza
+    che nessuno se ne accorgesse. Non blocca l'upsert (comportamento
+    invariato), solo lo segnala a chi chiama (run_once/run_policy_once lo
+    riportano nel risultato del sync)."""
     existing = session.scalar(
         select(ReferenceItem).where(ReferenceItem.source_url == ref.url)
     )
     if existing:
+        if (
+            conflicts is not None
+            and existing.source_category is not None
+            and (existing.source_category != ref.source_category or existing.source_tab != ref.source_tab)
+        ):
+            logger.warning(
+                "Reference %s cambia tab/categoria: %s/%s -> %s/%s (stesso URL presente piu' volte nello sheet?)",
+                ref.url, existing.source_tab, existing.source_category, ref.source_tab, ref.source_category,
+            )
+            conflicts.append({
+                "url": ref.url,
+                "from": f"{existing.source_tab}/{existing.source_category}",
+                "to": f"{ref.source_tab}/{ref.source_category}",
+            })
         existing.sheet_row_id = ref.sheet_row_id
         existing.source_category = ref.source_category
         existing.source_tab = ref.source_tab
@@ -280,7 +303,13 @@ def cleanup_old_references(session: Session, *, today: dt.date | None = None) ->
 
         paths = []
         if item.local_video_path:
-            paths.append(Path(item.local_video_path))
+            video_path = Path(item.local_video_path)
+            paths.append(video_path)
+            # Thumbnail in cache generata da desktop/api._reference_thumbnail
+            # (stessa convenzione di nome "<video>_thumb.jpg"): senza questa
+            # riga restava orfana su disco dopo la pulizia per retention —
+            # segnalato dall'utente (15/07/2026).
+            paths.append(video_path.with_name(video_path.stem + "_thumb.jpg"))
         if item.local_audio_path:
             paths.append(Path(item.local_audio_path))
         for frame in item.frame_paths or []:
@@ -314,6 +343,44 @@ def _remove_empty_parents(start: Path) -> None:
         except OSError:
             return
         current = current.parent
+
+
+def import_single_reference(url: str, *, source_tab: str, source_category: str, content_type_hint: str) -> dict:
+    """Aggiunge (o ri-scarica se gia' presente) una singola reference IG
+    fuori dal normale giro dello sheet — richiesto dall'utente (15/07/2026)
+    per poter aggiungere un link al volo senza aspettare il prossimo sync.
+    NON tocca lo Sheet (stesso comportamento non-invasivo di
+    retry_reference: nessun sheet_ref/sheet_client passato a process_item).
+    Settimana assegnata = settimana corrente, cosi' l'allocator la considera
+    fresca come le reference scaricate dallo sheet in questi giorni."""
+    if content_type_hint not in ("video", "carosello"):
+        raise ValueError(f"content_type_hint non valido: {content_type_hint!r} (attesi 'video' o 'carosello')")
+    url = url.strip()
+    if not url:
+        raise ValueError("serve un URL")
+
+    init_db()
+    today = dt.date.today()
+    week_start = today - dt.timedelta(days=today.weekday())
+    week_end = week_start + dt.timedelta(days=6)
+    ref = SheetReference(
+        url=url,
+        source_tab=source_tab.strip().upper(),
+        source_category=source_category.strip().upper(),
+        content_type_hint=content_type_hint,
+        week_start=week_start,
+        week_end=week_end,
+        sheet_row_id=f"MANUAL!{url}",
+        sheet_order=0,
+        sheet_row=0,
+        sheet_col=0,
+    )
+    with SessionLocal() as session:
+        item = upsert_reference(session, ref)
+        session.commit()
+        item_id = item.id
+
+    return retry_reference(item_id)
 
 
 def retry_reference(reference_id: int) -> dict:
@@ -410,7 +477,8 @@ def run_once(
     logger.info("Lette %d reference dallo sheet (%s)", len(refs), ", ".join(config.GOOGLE_SHEET_TABS))
 
     with SessionLocal() as session:
-        pairs = [(upsert_reference(session, ref), ref) for ref in refs]
+        conflicts: list = []
+        pairs = [(upsert_reference(session, ref, conflicts=conflicts), ref) for ref in refs]
         session.commit()
 
         cleanup_count = cleanup_old_references(session, today=today)
@@ -436,11 +504,17 @@ def run_once(
             "pending_total": total_pending,
             "processed": len(pending_pairs),
             "cleanup_deleted": cleanup_count,
+            "category_conflicts": conflicts,
         }
 
 
 def run_policy_once(year: int | None = None, *, policy: str | None = None, retry_stale_after_days: int | None = 3) -> dict:
     init_db()
+    # Backup DB prima del giro di sync settimanale (unico punto sempre
+    # automatico, via scheduler): richiesto dall'utente (15/07/2026) per
+    # poter tornare indietro in caso di bug — non blocca il sync se il
+    # backup stesso fallisce (run_backup_safe non solleva mai).
+    backup.run_backup_safe()
     year = year or dt.date.today().year
     today = dt.date.today()
     policy_items = parse_sync_policy(policy)
@@ -453,7 +527,8 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None, retry
     logger.info("Lette %d reference dallo sheet per sync policy", len(refs))
 
     with SessionLocal() as session:
-        pairs = [(upsert_reference(session, ref), ref) for ref in refs]
+        conflicts: list = []
+        pairs = [(upsert_reference(session, ref, conflicts=conflicts), ref) for ref in refs]
         session.commit()
 
         cleanup_count = cleanup_old_references(session, today=today)
@@ -485,6 +560,7 @@ def run_policy_once(year: int | None = None, *, policy: str | None = None, retry
             "processed": processed,
             "cleanup_deleted": cleanup_count,
             "policy": by_policy,
+            "category_conflicts": conflicts,
         }
 
     # Fuori dal `with` sopra: retry_stale_errors gestisce la propria sessione

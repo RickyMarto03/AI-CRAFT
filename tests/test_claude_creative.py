@@ -70,6 +70,22 @@ def test_assemble_full_prompt_contiene_tutti_i_pezzi_fissi_verbatim():
     assert "scena di prova" in full
 
 
+def test_write_carousel_prompts_aggiunge_clausola_solo_se_avoid_refusal(monkeypatch):
+    scene_min, scene_max = claude_creative._scene_target_range(_CHAR)
+    scene = "scena " + "x" * ((scene_min + scene_max) // 2 - 6)
+    seen_prompts = []
+    monkeypatch.setattr(
+        claude_creative, "run_headless",
+        lambda prompt, **kw: seen_prompts.append(prompt) or json.dumps({"scenes": [scene]}),
+    )
+
+    claude_creative.write_carousel_prompts(photo_paths=["a.jpg"], character=_CHAR, content_type="carosello", avoid_refusal=True)
+    claude_creative.write_carousel_prompts(photo_paths=["a.jpg"], character=_CHAR, content_type="carosello", avoid_refusal=False)
+
+    assert "was refused by content policy" in seen_prompts[0]
+    assert "was refused by content policy" not in seen_prompts[1]
+
+
 def test_write_carousel_prompts_rifiuta_lista_vuota():
     with pytest.raises(ValueError):
         claude_creative.write_carousel_prompts(photo_paths=[], character=_CHAR, content_type="carosello")
@@ -222,6 +238,23 @@ def test_write_talking_video_prompt_menziona_uso_video_reference_solo_se_attivo(
 
     assert "ONLY as a reference for movement" in seen_prompts[0]
     assert "No video reference is passed to the model" in seen_prompts[1]
+
+
+def test_write_talking_video_prompt_aggiunge_clausola_solo_se_avoid_refusal(monkeypatch):
+    seen_prompts = []
+    monkeypatch.setattr(claude_creative, "run_headless", lambda prompt, **kw: seen_prompts.append(prompt) or "scena finta")
+
+    claude_creative.write_talking_video_prompt(
+        frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
+        source_category="TALKING", duration_seconds=5.0, use_video_reference=False, avoid_refusal=True,
+    )
+    claude_creative.write_talking_video_prompt(
+        frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
+        source_category="TALKING", duration_seconds=5.0, use_video_reference=False, avoid_refusal=False,
+    )
+
+    assert "was refused by content policy" in seen_prompts[0]
+    assert "was refused by content policy" not in seen_prompts[1]
 
 
 def test_write_talking_video_prompt_usa_timestamp_segmenti_quando_presenti(monkeypatch):

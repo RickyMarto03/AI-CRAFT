@@ -129,6 +129,28 @@ class ContentPiece(Base):
     cost_credits_estimated: Mapped[Optional[float]]
     cost_credits_actual: Mapped[Optional[float]]
 
+    # True se l'ULTIMO tentativo su questo pezzo e' stato rifiutato da Claude
+    # per policy di contenuto (vedi claude_creative.ClaudeContentRefusedError).
+    # Non nel blueprint originale: aggiunto il 15/07/2026 per far scrivere a
+    # Claude un prompt piu' conservativo al retry successivo invece di
+    # ripetere lo stesso identico input (che darebbe lo stesso rifiuto) —
+    # vedi production/engine.py e production/claude_creative.py. Azzerato a
+    # consegna riuscita.
+    was_refused: Mapped[bool] = mapped_column(default=False)
+
+    # Voto manuale di qualita' 1-5 sul pezzo consegnato, opzionale. Non nel
+    # blueprint originale: aggiunto il 15/07/2026 su richiesta dell'utente per
+    # costruire nel tempo un riscontro su quali categorie/prompt rendono
+    # meglio — puro dato osservativo, non usato da nessuna logica automatica.
+    quality_rating: Mapped[Optional[int]]
+
+    # Priorita' manuale nella coda di produzione: a parita' di tutto il resto
+    # run_once produce prima i pezzi con priorita' piu' alta. Default 0 =
+    # ordine FIFO normale (comportamento invariato per chi non la tocca).
+    # Non nel blueprint originale: aggiunto il 15/07/2026 su richiesta
+    # dell'utente per poter promuovere un pezzo specifico in cima alla coda.
+    priority: Mapped[int] = mapped_column(default=0)
+
     created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(
         default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
@@ -226,3 +248,25 @@ class ImprovementNote(Base):
     title: Mapped[str]
     description: Mapped[Optional[str]]
     status: Mapped[str] = mapped_column(default="aperto")  # "aperto" | "fatto" | "scartato"
+
+
+class CharacterVersion(Base):
+    """Storico degli snapshot di CharacterProfile (production/character.py).
+
+    Il character resta un costante di CODICE (vedi character.py per il
+    perche'), non editabile da UI: questa tabella non lo rende editabile, e'
+    solo un log di sola-append che registra automaticamente un nuovo
+    snapshot quando physical_description/mandatory_additions/negative_prompt
+    cambiano rispetto all'ultimo registrato (character.record_version_if_changed,
+    chiamata da init_db). Non nel blueprint originale: aggiunta il
+    15/07/2026 su richiesta dell'utente — oggi modificando character.py non
+    restava nessuno storico di "com'era prima"."""
+
+    __tablename__ = "character_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    creator_nome: Mapped[str]
+    physical_description: Mapped[Optional[str]]
+    mandatory_additions: Mapped[str]
+    negative_prompt: Mapped[str]
+    created_at: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)

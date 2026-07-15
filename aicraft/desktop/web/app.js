@@ -1,7 +1,12 @@
 'use strict';
 
 /* ============ Bridge & stato ============ */
-const state = { meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi', backlogFilter: 'aperto', libFilter: { status: '', category: '', search: '', page: 0 }, expandedPieceId: null, showMonthly: false };
+const state = {
+  meta: null, profiles: [], activeProfileId: null, currentPlan: null, view: 'oggi',
+  backlogFilter: 'aperto', backlogSearch: '',
+  libFilter: { status: '', category: '', search: '', page: 0 },
+  expandedPieceId: null, showMonthly: false, showAllocPreview: false, showDryRun: false,
+};
 
 async function call(method, ...args) {
   try {
@@ -38,6 +43,7 @@ const REF_STATUS_BADGE = {
   error: 'red', download_error: 'red', private: 'red', unavailable: 'red', transcription_error: 'red',
 };
 const REF_RETRYABLE_STATUSES = ['error', 'download_error', 'private', 'unavailable', 'transcription_error'];
+const PIECE_FAILURE_STATUSES = ['error', 'blocked_nsfw', 'too_long', 'content_refused'];
 
 /* ============ Utility ============ */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -123,7 +129,9 @@ function chipStrip(items) {
 
 /* ============ Vista: Oggi ============ */
 VIEWS.oggi = async () => {
-  const [r, agenda] = await Promise.all([call('overview'), call('today_agenda')]);
+  const [r, agenda, health, events] = await Promise.all([
+    call('overview'), call('today_agenda'), call('health_check'), call('today_events'),
+  ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const o = r.overview;
   const cp = o.content_per_stato || {};
@@ -131,7 +139,29 @@ VIEWS.oggi = async () => {
   const delivered = cp['delivered'] || 0;
   const bal = o.saldo_crediti;
 
-  return head('Oggi', 'Panoramica rapida del tuo lavoro') +
+  const warnings = [];
+  if (o.budget_alert) warnings.push(`Saldo sotto la soglia di ${fmt(o.budget_alert_threshold)} CR.`);
+  if (health.ok && !health.all_ok) {
+    const missing = [];
+    if (!health.higgsfield_cli) missing.push('CLI Higgsfield');
+    if (!health.claude_cli) missing.push('CLI Claude');
+    if (!health.google_sheet_credentials) missing.push('credenziali Google Sheet');
+    warnings.push(`Configurazione incompleta: ${missing.join(', ')} — vedi tab Sistema.`);
+  }
+  const warnBanner = warnings.length
+    ? `<div class="warn-list" style="margin-bottom:16px">${warnings.map((w) => `<div class="warn">${esc(w)}</div>`).join('')}</div>`
+    : '';
+
+  const eventsHtml = events.ok && events.events.length
+    ? `<div class="plist">${events.events.map((e) => `
+        <div class="row" style="padding:5px 0;font-size:11.5px">
+          <span class="badge ${e.status === 'completed' ? 'green' : e.status === 'failed' ? 'red' : 'amber'}" style="min-width:78px;text-align:center">${esc(e.status)}</span>
+          <span class="muted" style="flex:1">${CT_LABELS[e.content_type] || esc(e.content_type || '—')} #${e.piece_id} · ${esc(e.stage)} · ${esc(e.profile_nome || '—')}</span>
+          <span class="faint">${esc((e.timestamp || '').replace('T', ' ').slice(11, 19))}</span>
+        </div>`).join('')}</div>`
+    : '<div class="empty">Nessuna attività registrata oggi.</div>';
+
+  return head('Oggi', 'Panoramica rapida del tuo lavoro') + warnBanner +
     chipStrip([
       { label: 'Saldo', value: fmt(bal) + ' CR', color: bal < 0 ? '#ff6b5e' : '#8fe23a' },
       { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
@@ -140,6 +170,8 @@ VIEWS.oggi = async () => {
     ]) +
     `<div class="section-title">Agenda di oggi (${DAY_LABELS[agenda.giorno] || agenda.giorno || ''})</div>` +
     agendaSection(agenda) + `
+    <div class="section-title">Attività di oggi (tutti i profili)</div>` +
+    eventsHtml + `
     <div class="section-title">Profili</div>
     ${o.profili.length ? '<div class="plist">' + o.profili.map((p) => `
       <div class="prow ${p.attivo ? '' : ''}">
@@ -302,6 +334,7 @@ VIEWS.piano = async () => {
     <span class="badge gray">v${pl.version}</span>${statusBadge}
     <span class="badge ${pl.missing_references ? 'amber' : 'green'}">${pl.assigned_references}/${pl.total} ref</span>
     <button class="btn sm blue" data-action="plan-assign-refs">Assegna reference</button>
+    <button class="btn sm" data-action="plan-toggle-alloc-preview">${state.showAllocPreview ? 'Nascondi' : 'Anteprima'} assegnazione</button>
     <button class="btn sm" data-action="plan-duplicate" data-profile="${active.id}">Duplica come prossima settimana</button>
     <button class="btn sm" data-action="plan-toggle-monthly">Vista mensile</button>
     <button class="btn danger sm" data-action="plan-reset">Azzera</button>
@@ -317,13 +350,35 @@ VIEWS.piano = async () => {
     monthlyHtml = m.ok ? monthlySummarySection(m) : `<div class="empty">${esc(m.error)}</div>`;
   }
 
+  let allocPreviewHtml = '';
+  if (state.showAllocPreview) {
+    const ap = await call('plan_allocation_preview', pl.id);
+    allocPreviewHtml = ap.ok ? allocationPreviewSection(ap) : `<div class="empty">${esc(ap.error)}</div>`;
+  }
+
   return head('Piano', 'Calendario editoriale · ' + prettyDate(pl.week_start) + ' → ' + prettyDate(pl.week_end), actions) +
     updatedNote +
     chipStrip(cts.map((ct) => ({ label: CT_LABELS[ct], value: pl.totals_by_type[ct], color: CT_COLORS[ct] }))
       .concat([{ label: 'Totale', value: pl.total, color: '#4c8bf5' }])) +
     `<div class="week-strip">${cards}</div>` +
-    monthlyHtml;
+    monthlyHtml + allocPreviewHtml;
 };
+
+function allocationPreviewSection(ap) {
+  // Simula assign_references_to_plan SENZA assegnare nulla: mostra quali
+  // reference verrebbero scelte se si assegnasse ora — richiesto
+  // dall'utente per vedere il mix prima di premere Approva.
+  const rows = ap.pieces.length ? ap.pieces.map((p) => `
+    <div class="row" style="padding:5px 0">
+      <span class="dc-dot" style="background:${CT_COLORS[p.content_type] || '#4c8bf5'};width:8px;height:8px;border-radius:50%"></span>
+      <span class="muted" style="flex:1;margin-left:8px">${CT_LABELS[p.content_type] || esc(p.content_type)} #${p.piece_id}</span>
+      ${p.would_assign
+        ? `<span class="faint" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.reference_category || '')}${p.reference_week ? ' · ' + esc(p.reference_week) : ''}${p.reference_caption ? ' · "' + esc(p.reference_caption) + '"' : ''}</span>`
+        : '<span class="badge amber">nessuna reference disponibile</span>'}
+    </div>`).join('') : '<div class="empty">Tutte le reference sono gia\' assegnate.</div>';
+  return `<div class="section-title">Anteprima assegnazione (${ap.would_assign} assegnabili, ${ap.would_miss} mancanti — nessuna modifica salvata)</div>
+    <div class="card">${rows}</div>`;
+}
 
 function monthlySummarySection(m) {
   const MONTH_NAMES = ['', 'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
@@ -364,7 +419,9 @@ function timelineRows(events) {
 }
 
 VIEWS.produzione = async () => {
-  const [r, piecesRes] = await Promise.all([call('production_preview'), call('list_content_pieces', null, null, 20)]);
+  const [r, piecesRes, stageStats] = await Promise.all([
+    call('production_preview'), call('list_content_pieces', null, null, 20), call('stage_duration_stats'),
+  ]);
   const meta = state.meta;
   const capCards = meta.content_types.map((ct) => `<div class="card">
     <div class="row"><b>${CT_LABELS[ct]}</b><div class="spacer"></div><span class="badge green">Pronto</span></div>
@@ -380,9 +437,21 @@ VIEWS.produzione = async () => {
       <div class="muted">${r.ready_count} contenuti pronti da piani approvati · stima ${fmt(r.estimated_cost)} crediti su ${fmt(r.balance)} disponibili.</div>
       <div class="row" style="margin-top:16px">
         <button class="btn primary" data-action="prod-preview">Avvia una prova senza costi</button>
+        ${r.ready_count ? `<button class="btn" data-action="prod-toggle-dry-run">${state.showDryRun ? 'Nascondi' : 'Vedi'} dettaglio pezzi</button>` : ''}
         <button class="btn danger" data-action="prod-run" ${(!r.ready_count || !covers) ? 'disabled' : ''}>Produci davvero</button>
       </div>
     </div></div></div>`;
+  }
+
+  let dryRunHtml = '';
+  if (r.ok && state.showDryRun && (r.pieces || []).length) {
+    dryRunHtml = `<div class="section-title">Dettaglio (nessun credito speso)</div>
+      <div class="card"><div class="plist">${r.pieces.map((p) => `
+        <div class="row" style="padding:5px 0">
+          <span class="dc-dot" style="background:${CT_COLORS[p.content_type] || '#4c8bf5'};width:8px;height:8px;border-radius:50%"></span>
+          <span class="muted" style="flex:1;margin-left:8px">${CT_LABELS[p.content_type] || esc(p.content_type)} #${p.id}${p.reference_category ? ' · ' + esc(p.reference_category) : ''}</span>
+          <span class="num">${fmt(p.estimated_cost)} CR</span>
+        </div>`).join('')}</div></div>`;
   }
 
   let piecesHtml = '<div class="empty">Nessun pezzo prodotto finora.</div>';
@@ -394,14 +463,22 @@ VIEWS.produzione = async () => {
         const t = await call('piece_timeline', p.id);
         timelineHtml = t.ok ? timelineRows(t.events) : `<div class="empty">${esc(t.error)}</div>`;
       }
+      const qualityOpts = [0, 1, 2, 3, 4, 5].map((n) =>
+        `<option value="${n}" ${p.quality_rating === n || (!p.quality_rating && n === 0) ? 'selected' : ''}>${n === 0 ? 'voto…' : '★'.repeat(n)}</option>`).join('');
       return `<div class="card" style="margin-bottom:8px">
         <div class="row" data-action="piece-toggle-timeline" data-id="${p.id}" style="cursor:pointer">
-          <span class="dc-dot" style="background:${CT_COLORS[p.content_type] || '#4c8bf5'};width:9px;height:9px;border-radius:50%;flex-shrink:0"></span>
+          ${thumbBox(p.thumbnail_url, (CT_LABELS[p.content_type] || '?')[0], 36, p.preview_kind, p.preview_url)}
           <div><div class="p-name">${CT_LABELS[p.content_type] || esc(p.content_type)} · #${p.id}</div>
             <div class="faint">${esc(p.profile_nome || '—')}</div></div>
           <div class="spacer"></div>
           ${p.cost_credits_actual != null ? `<span class="faint num" style="margin-right:10px">${fmt(p.cost_credits_actual)} CR</span>` : ''}
           <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span>
+        </div>
+        <div class="row wrap" style="margin-top:8px;gap:8px">
+          ${PIECE_FAILURE_STATUSES.includes(p.status) ? `<button class="btn sm" data-action="piece-retry" data-id="${p.id}">Riprova${p.was_refused ? ' (prompt più prudente)' : ''}</button>` : ''}
+          ${p.status === 'reference_ready' ? `<button class="btn sm" data-action="piece-bump-priority" data-id="${p.id}">Metti in cima alla coda</button>` : ''}
+          ${p.status === 'delivered' ? `<select data-change="piece-quality" data-id="${p.id}" style="width:90px">${qualityOpts}</select>` : ''}
+          ${p.has_output ? `<button class="btn sm" data-action="piece-open-folder" data-id="${p.id}">Apri cartella</button>` : ''}
         </div>
         ${expanded ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">${timelineHtml}</div>` : ''}
       </div>`;
@@ -409,9 +486,17 @@ VIEWS.produzione = async () => {
     piecesHtml = rows.join('');
   }
 
-  return head('Produzione', 'Centro operativo della produzione') + hero + `
+  const stageStatsHtml = stageStats.ok && stageStats.stages.length
+    ? `<div class="section-title">Durata media per stadio</div>
+      <div class="card"><div class="grid cols-3">${stageStats.stages.map((s) => `
+        <div class="tile"><div class="t-label">${esc(s.stage)}</div><div class="t-value num">${s.avg_seconds.toFixed(1)}s</div><div class="t-sub">${s.count} completati</div></div>
+      `).join('')}</div></div>`
+    : '';
+
+  return head('Produzione', 'Centro operativo della produzione') + hero + dryRunHtml + `
     <div class="section-title">Capacità di produzione</div>
     <div class="grid cols-3">${capCards}</div>
+    ${stageStatsHtml}
     <div class="section-title">Pezzi recenti (clicca per la timeline a checkpoint)</div>
     ${piecesHtml}`;
 };
@@ -448,12 +533,54 @@ function weeklyTrendRows(trend) {
   return legend + rows;
 }
 
-function thumbBox(url, fallbackLetter, size) {
+function thumbBox(url, fallbackLetter, size, previewKind, previewUrl) {
   size = size || 52;
-  if (url) {
-    return `<img src="${esc(url)}" style="width:${size}px;height:${size}px;border-radius:9px;object-fit:cover;flex-shrink:0;background:var(--bg-card-2)" onerror="this.style.display='none'" />`;
+  const img = url
+    ? `<img src="${esc(url)}" style="width:${size}px;height:${size}px;border-radius:9px;object-fit:cover;flex-shrink:0;background:var(--bg-card-2)" onerror="this.style.display='none'" />`
+    : `<div class="p-avatar" style="width:${size}px;height:${size}px;flex-shrink:0">${esc(fallbackLetter || '?')}</div>`;
+  if (!previewKind || !previewUrl) return img;
+  return `<div data-action="open-lightbox" data-kind="${esc(previewKind)}" data-url="${esc(previewUrl)}" style="cursor:zoom-in;flex-shrink:0">${img}</div>`;
+}
+
+/* ============ Ricerca globale (topbar) ============ */
+async function runGlobalSearch() {
+  const q = ($('#globalSearchInput')?.value || '').trim();
+  const panel = $('#globalSearchPanel');
+  if (!panel) return;
+  if (!q) { panel.innerHTML = ''; return; }
+  const r = await call('global_search', q);
+  if (!r.ok) { panel.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+  const sections = [
+    ['Reference', r.references, (x) => `${esc(x.category || '—')} · ${esc(x.status)}${x.caption ? ' — "' + esc(x.caption.slice(0, 60)) + '"' : ''}`, 'libreria'],
+    ['Contenuti generati', r.pieces, (x) => `${CT_LABELS[x.content_type] || esc(x.content_type)} #${x.id} · ${esc(x.status)}`, 'libreria'],
+    ['Da migliorare', r.backlog, (x) => `${esc(x.title)} · ${esc(x.category)}`, 'backlog'],
+  ];
+  let html = '';
+  for (const [title, items, render, view] of sections) {
+    if (!items.length) continue;
+    html += `<div class="gsearch-section-title">${title}</div>` +
+      items.map((x) => `<div class="gsearch-item" data-action="gsearch-goto" data-view="${view}">${render(x)}</div>`).join('');
   }
-  return `<div class="p-avatar" style="width:${size}px;height:${size}px;flex-shrink:0">${esc(fallbackLetter || '?')}</div>`;
+  panel.innerHTML = html || '<div class="empty">Nessun risultato.</div>';
+}
+
+/* ============ Lightbox QA (foto/video a piena risoluzione) ============ */
+function openLightbox(kind, url) {
+  closeLightbox();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'lightbox-backdrop';
+  backdrop.id = 'lightboxBackdrop';
+  const media = kind === 'video'
+    ? `<video src="${esc(url)}" controls autoplay></video>`
+    : `<img src="${esc(url)}" />`;
+  backdrop.innerHTML = `<button class="lightbox-close" data-action="close-lightbox">✕</button>
+    <div class="lightbox-content">${media}</div>`;
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeLightbox(); });
+  document.body.appendChild(backdrop);
+}
+function closeLightbox() {
+  const el = document.getElementById('lightboxBackdrop');
+  if (el) el.remove();
 }
 
 const LIB_PAGE_SIZE = 50;
@@ -486,7 +613,7 @@ VIEWS.libreria = async () => {
   const filteredRows = listed.ok && (listed.references || []).length
     ? listed.references.map((x) => `
       <div class="prow">
-        ${thumbBox(x.thumbnail_url, (x.source_category || '?')[0])}
+        ${thumbBox(x.thumbnail_url, (x.source_category || '?')[0], 52, x.preview_kind, x.preview_url)}
         <div style="min-width:0">
           <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span>
             ${x.content_type_hint === 'video' ? '<span class="badge gray">video</span>' : ''}${x.has_transcript ? '<span class="badge gray">trascrizione</span>' : ''}</div>
@@ -503,10 +630,11 @@ VIEWS.libreria = async () => {
   const generatedRows = generated.ok && generated.pieces.length
     ? generated.pieces.map((p) => `
       <div class="prow">
-        ${thumbBox(p.thumbnail_url, (CT_LABELS[p.content_type] || '?')[0])}
+        ${thumbBox(p.thumbnail_url, (CT_LABELS[p.content_type] || '?')[0], 52, p.preview_kind, p.preview_url)}
         <div style="min-width:0">
           <div class="p-name">${CT_LABELS[p.content_type] || esc(p.content_type)} · #${p.id}
-            <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span></div>
+            <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span>
+            ${p.quality_rating ? `<span class="badge amber">${'★'.repeat(p.quality_rating)}</span>` : ''}</div>
           <div class="faint">${esc(p.profile_nome || '—')}${p.cost_credits_actual != null ? ' · ' + fmt(p.cost_credits_actual) + ' CR' : ''}</div>
           ${p.caption ? `<div class="faint" style="margin-top:2px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">"${esc(p.caption)}"</div>` : ''}
         </div>
@@ -535,6 +663,23 @@ VIEWS.libreria = async () => {
     <div class="card">${weeklyTrendRows(trend)}</div>
     <div class="section-title">Contenuti generati (ultimi 20)</div>
     <div class="plist">${generatedRows}</div>
+    <div class="section-title">Aggiungi un link manualmente</div>
+    <div class="card" style="margin-bottom:20px">
+      <div class="row wrap">
+        <input id="manualRefUrl" placeholder="URL Instagram" style="flex:2;min-width:220px" />
+        <select id="manualRefTab">
+          <option value="CAROSELLI">CAROSELLI</option>
+          <option value="VIRAL GENERAL">VIRAL GENERAL</option>
+        </select>
+        <input id="manualRefCategory" placeholder="Categoria (es. BOOBS, TALKING)" style="width:170px" />
+        <select id="manualRefType">
+          <option value="carosello">Carosello</option>
+          <option value="video">Video</option>
+        </select>
+        <button class="btn blue" data-action="reference-import-manual">Importa e scarica</button>
+      </div>
+      <div class="faint" style="margin-top:8px">Scarica subito, fuori dal normale giro dello sheet — utile per aggiungere un link al volo senza aspettare il prossimo sync.</div>
+    </div>
     <div class="section-title">Reference scaricate (filtrabili, cercabili)</div>
     <div class="row wrap" style="margin-bottom:12px">
       <select id="libFilterStatus" data-change="lib-filter-status">${statusOpts}</select>
@@ -565,13 +710,17 @@ function listedPagination(listed, filter) {
 VIEWS.costi = async () => {
   await ensurePlan();
   const planId = state.currentPlan ? state.currentPlan.id : null;
-  const [r, history, spendByType, projection] = await Promise.all([
+  const [r, history, spendByType, projection, costCompare] = await Promise.all([
     call('budget_status', planId),
     call('ledger_history', 30),
     call('spend_by_content_type'),
     call('monthly_projection', 14),
+    call('cost_estimate_vs_actual'),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
+  const alertBanner = r.budget_alert
+    ? `<div class="warn-list" style="margin-bottom:16px"><div class="warn">Saldo sotto la soglia di ${fmt(r.budget_alert_threshold)} CR — valuta una ricarica prima di produrre altro.</div></div>`
+    : '';
   let hero = '';
   if (r.plan_cost != null) {
     const covers = r.covers;
@@ -608,7 +757,17 @@ VIEWS.costi = async () => {
       </div>`).join('')
     : '<div class="empty">Nessun movimento ancora.</div>';
 
-  return head('Costi', 'Budget e crediti (fonte: CreditLedger)') + hero + `
+  const compareRows = costCompare.ok && Object.keys(costCompare.by_content_type).length
+    ? Object.entries(costCompare.by_content_type).map(([ct, b]) => `
+        <div class="row" style="padding:5px 0">
+          <span class="muted" style="flex:1">${CT_LABELS[ct] || esc(ct)} <span class="faint">(${b.count})</span></span>
+          <span class="faint num" style="margin-right:10px">stima ${fmt(b.estimated)}</span>
+          <span class="num" style="margin-right:10px">reale ${fmt(b.actual)}</span>
+          <span class="num" style="color:${b.delta > 0 ? 'var(--red)' : 'var(--green)'}">${b.delta > 0 ? '+' : ''}${fmt(b.delta)}${b.delta_pct != null ? ' (' + b.delta_pct.toFixed(0) + '%)' : ''}</span>
+        </div>`).join('')
+    : '<div class="empty">Nessun pezzo con stima e costo reale entrambi disponibili ancora.</div>';
+
+  return head('Costi', 'Budget e crediti (fonte: CreditLedger)') + alertBanner + hero + `
     <div class="grid cols-4" style="margin-top:16px">
       <div class="tile accent-${r.balance < 0 ? 'red' : 'green'}"><div class="t-label">Saldo attuale</div><div class="t-value num">${fmt(r.balance)}</div><div class="t-sub">crediti</div></div>
       ${projTile}
@@ -621,19 +780,51 @@ VIEWS.costi = async () => {
     </div>
     <div class="section-title">Spesa per tipo contenuto</div>
     <div class="card">${spendRows}</div>
+    <div class="section-title">Stima vs reale (per tenere aggiornate le previsioni di costo)</div>
+    <div class="card">${compareRows}</div>
     <div class="section-title">Storico movimenti (ultimi 30)</div>
     <div class="card">${historyRows}</div>`;
 };
 
 /* ============ Vista: Sistema ============ */
 VIEWS.sistema = async () => {
-  const r = await call('overview');
+  const [r, health, sched, charHist] = await Promise.all([
+    call('overview'), call('health_check'), call('scheduler_status'), call('character_history'),
+  ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const o = r.overview;
   const block = (title, map) => `<div class="card"><div class="section-title" style="margin:0 0 12px">${title}</div>
     ${Object.keys(map).length ? Object.entries(map).map(([k, v]) =>
       `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${esc(k)}</span><span class="num">${v}</span></div>`).join('') : '<div class="faint">nessuno</div>'}</div>`;
-  return head('Sistema', 'Stato complessivo — legge lo stesso DB, nessuna logica duplicata') +
+
+  const healthHtml = health.ok ? `<div class="card">
+      <div class="muted" style="font-weight:700;margin-bottom:10px">Configurazione</div>
+      <div class="row" style="padding:4px 0"><span class="muted" style="flex:1">CLI Higgsfield</span><span class="badge ${health.higgsfield_cli ? 'green' : 'red'}">${health.higgsfield_cli ? 'ok' : 'non trovato'}</span></div>
+      <div class="row" style="padding:4px 0"><span class="muted" style="flex:1">CLI Claude</span><span class="badge ${health.claude_cli ? 'green' : 'red'}">${health.claude_cli ? 'ok' : 'non trovato'}</span></div>
+      <div class="row" style="padding:4px 0"><span class="muted" style="flex:1">Credenziali Google Sheet</span><span class="badge ${health.google_sheet_credentials ? 'green' : 'red'}">${health.google_sheet_credentials ? 'ok' : 'mancanti'}</span></div>
+    </div>` : `<div class="empty">${esc(health.error)}</div>`;
+
+  const schedLine = (label, info) => info
+    ? `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${label}</span><span class="faint">${esc((info.last_modified || '').replace('T', ' ').slice(0, 19))}</span></div>`
+    : `<div class="row" style="padding:4px 0"><span class="muted" style="flex:1">${label}</span><span class="faint">mai eseguito</span></div>`;
+  const schedHtml = sched.ok ? `<div class="card">
+      <div class="muted" style="font-weight:700;margin-bottom:10px">Scheduler settimanale</div>
+      <div class="row" style="padding:4px 0"><span class="muted" style="flex:1">Installato</span><span class="badge ${sched.installed ? 'green' : 'gray'}">${sched.installed ? 'sì' : 'no'}</span></div>
+      ${schedLine('Ultimo output', sched.out)}
+      ${schedLine('Ultimo errore', sched.err)}
+      ${sched.err && sched.err.tail ? `<div class="faint" style="margin-top:8px;white-space:pre-wrap;font-family:var(--mono);font-size:10.5px">${esc(sched.err.tail)}</div>` : ''}
+    </div>` : `<div class="empty">${esc(sched.error)}</div>`;
+
+  const charHtml = charHist.ok && charHist.versions.length
+    ? `<div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Storico personaggio (${charHist.versions[0].creator_nome})</div>
+        ${charHist.versions.map((v, i) => `<div class="row" style="padding:5px 0;align-items:flex-start">
+          <span class="badge ${i === 0 ? 'green' : 'gray'}">${i === 0 ? 'attuale' : 'v' + (charHist.versions.length - i)}</span>
+          <span class="faint" style="flex:1">${esc((v.created_at || '').replace('T', ' ').slice(0, 19))} · ${esc(v.mandatory_additions)}</span>
+        </div>`).join('')}</div>`
+    : '<div class="empty">Nessuno storico personaggio ancora.</div>';
+
+  return head('Sistema', 'Stato complessivo — legge lo stesso DB, nessuna logica duplicata',
+    '<button class="btn" data-action="run-backup">Backup DB ora</button>') +
     chipStrip([
       { label: 'Saldo', value: fmt(o.saldo_crediti) + ' CR', color: o.saldo_crediti < 0 ? '#ff6b5e' : '#8fe23a' },
       { label: 'Profili', value: o.profili.length, color: '#4c8bf5' },
@@ -641,19 +832,27 @@ VIEWS.sistema = async () => {
     <div class="grid cols-3">
       ${block('Reference per stato', o.reference_per_stato)}
       ${block('Piani per stato', o.piani_per_stato)}
-      ${block('Content per stato', o.content_per_stato)}</div>`;
+      ${block('Content per stato', o.content_per_stato)}</div>
+    <div class="section-title">Configurazione e automazioni</div>
+    <div class="grid cols-3">${healthHtml}${schedHtml}${charHtml}</div>`;
 };
 
 /* ============ Vista: Da migliorare (backlog) ============ */
 VIEWS.backlog = async () => {
   const filter = state.backlogFilter || 'aperto';
-  const r = await call('list_backlog', filter);
+  const search = state.backlogSearch || '';
+  const r = await call('list_backlog', filter, search || null);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const notes = r.notes;
 
   const filterBtns = ['aperto', 'fatto', 'scartato', 'tutti'].map((f) =>
     `<button class="btn sm ${filter === f ? 'primary' : ''}" data-action="backlog-filter" data-status="${f}">${BACKLOG_STATUS_LABELS[f]}</button>`
   ).join('');
+  const searchBar = `<div class="row wrap" style="margin-bottom:16px">
+    <input id="backlogSearchInput" placeholder="Cerca nel backlog…" value="${esc(search)}" style="flex:1;min-width:200px" data-keydown="backlog-search-enter" />
+    <button class="btn sm" data-action="backlog-search">Cerca</button>
+    ${search ? '<button class="btn sm" data-action="backlog-search-clear">Pulisci</button>' : ''}
+  </div>`;
 
   const rows = notes.length ? notes.map((n) => `
     <div class="card" style="margin-bottom:10px">
@@ -674,8 +873,9 @@ VIEWS.backlog = async () => {
     </div>`).join('') : '<div class="empty">Nessuna voce con questo filtro.</div>';
 
   return head('Da migliorare', 'Backlog di limiti noti e idee — cose annotate durante il lavoro da riprendere in futuro') +
-    `<div class="row wrap" style="margin-bottom:16px">${filterBtns}</div>
-    <div class="card" style="margin-bottom:20px">
+    `<div class="row wrap" style="margin-bottom:16px">${filterBtns}</div>` +
+    searchBar +
+    `<div class="card" style="margin-bottom:20px">
       <div class="muted" style="font-weight:700;margin-bottom:10px">Aggiungi voce</div>
       <div class="row wrap">
         <input id="newBacklogCategory" placeholder="Categoria (es. qualita)" style="width:160px" />
@@ -779,7 +979,22 @@ const ACTIONS = {
   'references-sync': async () => {
     toast('Aggiorno libreria…');
     const r = await call('references_sync_policy');
-    r.ok ? (toast('Libreria aggiornata · processati ' + (r.sync?.processed ?? '—') + ' · pronte ' + r.ready), setView('libreria')) : toast(r.error, 'err');
+    if (!r.ok) return toast(r.error, 'err');
+    const conflicts = r.sync?.category_conflicts || [];
+    toast('Libreria aggiornata · processati ' + (r.sync?.processed ?? '—') + ' · pronte ' + r.ready
+      + (conflicts.length ? ` · attenzione: ${conflicts.length} URL con tab/categoria cambiati` : ''));
+    setView('libreria');
+  },
+  'reference-import-manual': async () => {
+    const url = ($('#manualRefUrl')?.value || '').trim();
+    const tab = $('#manualRefTab')?.value;
+    const category = ($('#manualRefCategory')?.value || '').trim();
+    const contentType = $('#manualRefType')?.value;
+    if (!url) return toast('Inserisci un URL', 'err');
+    if (!category) return toast('Inserisci una categoria', 'err');
+    toast('Importo e scarico…');
+    const r = await call('import_reference_url', url, tab, category, contentType);
+    if (r.ok) { toast('Reference importata: stato ' + r.import.status); setView('libreria'); } else toast(r.error, 'err');
   },
   'reference-retry': async (el) => {
     const id = Number(el.dataset.id);
@@ -862,6 +1077,35 @@ const ACTIONS = {
     const r = await call('set_backlog_status', Number(el.dataset.id), el.dataset.status);
     r.ok ? (toast('Stato aggiornato'), setView('backlog')) : toast(r.error, 'err');
   },
+  'backlog-search': () => {
+    state.backlogSearch = ($('#backlogSearchInput')?.value || '').trim();
+    setView('backlog');
+  },
+  'backlog-search-clear': () => { state.backlogSearch = ''; setView('backlog'); },
+  'open-lightbox': (el) => openLightbox(el.dataset.kind, el.dataset.url),
+  'close-lightbox': () => closeLightbox(),
+  'gsearch-goto': (el) => {
+    $('#globalSearchPanel').innerHTML = '';
+    $('#globalSearchInput').value = '';
+    setView(el.dataset.view);
+  },
+  'piece-retry': async (el) => {
+    const id = Number(el.dataset.id);
+    toast('Riprovo il pezzo…');
+    const r = await call('retry_content_piece', id);
+    if (r.ok) { toast('Nuovo stato: ' + r.retry.status); refreshBalance(); setView(state.view); } else toast(r.error, 'err');
+  },
+  'piece-bump-priority': async (el) => {
+    const r = await call('bump_piece_priority', Number(el.dataset.id));
+    r.ok ? (toast('Pezzo messo in cima alla coda'), setView(state.view)) : toast(r.error, 'err');
+  },
+  'plan-toggle-alloc-preview': () => { state.showAllocPreview = !state.showAllocPreview; reloadPlanView(); },
+  'prod-toggle-dry-run': () => { state.showDryRun = !state.showDryRun; setView('produzione'); },
+  'run-backup': async () => {
+    toast('Backup in corso…');
+    const r = await call('run_backup');
+    r.ok ? toast('Backup salvato: ' + r.path) : toast('Backup non riuscito: ' + (r.reason || r.error || '—'), 'err');
+  },
 };
 
 let stepBusy = false;
@@ -878,6 +1122,10 @@ async function stepCell(ct, day, delta) {
 
 /* ============ Delegazione eventi ============ */
 document.addEventListener('click', (e) => {
+  if (!e.target.closest('.gsearch')) {
+    const panel = document.getElementById('globalSearchPanel');
+    if (panel && panel.innerHTML) panel.innerHTML = '';
+  }
   const tab = e.target.closest('.tab');
   if (tab) { setView(tab.dataset.view); return; }
   const act = e.target.closest('[data-action]');
@@ -894,11 +1142,20 @@ document.addEventListener('change', async (e) => {
   const libStatus = e.target.closest('[data-change="lib-filter-status"]');
   if (libStatus) { state.libFilter.status = libStatus.value; state.libFilter.page = 0; setView('libreria'); return; }
   const libCategory = e.target.closest('[data-change="lib-filter-category"]');
-  if (libCategory) { state.libFilter.category = libCategory.value; state.libFilter.page = 0; setView('libreria'); }
+  if (libCategory) { state.libFilter.category = libCategory.value; state.libFilter.page = 0; setView('libreria'); return; }
+  const quality = e.target.closest('[data-change="piece-quality"]');
+  if (quality) {
+    const rating = Number(quality.value);
+    if (!rating) return;
+    const r = await call('set_piece_quality', Number(quality.dataset.id), rating);
+    r.ok ? toast('Voto salvato') : toast(r.error, 'err');
+  }
 });
 document.addEventListener('keydown', (e) => {
-  const el = e.target.closest('[data-keydown="lib-search-enter"]');
-  if (el && e.key === 'Enter') { ACTIONS['lib-search'](); }
+  if (e.key !== 'Enter') return;
+  if (e.target.closest('[data-keydown="lib-search-enter"]')) { ACTIONS['lib-search'](); return; }
+  if (e.target.closest('[data-keydown="backlog-search-enter"]')) { ACTIONS['backlog-search'](); return; }
+  if (e.target.closest('[data-keydown="global-search-enter"]')) { runGlobalSearch(); }
 });
 
 /* ============ Avvio ============ */

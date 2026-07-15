@@ -8,7 +8,7 @@ docs/ai-craft-architecture.md §12.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db.models import ImprovementNote
@@ -23,10 +23,21 @@ def add_note(session: Session, *, category: str, title: str, description: str = 
     return note
 
 
-def list_notes(session: Session, *, status: str | None = "aperto") -> list:
+def list_notes(session: Session, *, status: str | None = "aperto", search: str | None = None) -> list:
+    """`search` filtra per sottostringa (case-insensitive) in titolo,
+    descrizione o categoria — aggiunto il 15/07/2026 su richiesta
+    dell'utente: il backlog cresce nel tempo, serviva un modo per
+    ritrovare una voce senza scorrere tutto."""
     stmt = select(ImprovementNote).order_by(ImprovementNote.created_at.desc())
     if status is not None:
         stmt = stmt.where(ImprovementNote.status == status)
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            ImprovementNote.title.ilike(like),
+            ImprovementNote.description.ilike(like),
+            ImprovementNote.category.ilike(like),
+        ))
     return list(session.scalars(stmt))
 
 

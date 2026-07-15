@@ -152,6 +152,7 @@ def _stage_image_regen(session: Session, piece: ContentPiece, reference: Optiona
         character=char,
         content_type=piece.content_type,
         source_category=(reference.source_category if reference else "") or "",
+        avoid_refusal=piece.was_refused,
     )
 
     assets = list(piece.generated_assets or [])
@@ -229,6 +230,7 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
         source_category=reference.source_category or "",
         duration_seconds=duration_seconds,
         use_video_reference=use_video_reference,
+        avoid_refusal=piece.was_refused,
     )
 
     # duration reale del video originale (deciso con l'utente), non il
@@ -324,6 +326,7 @@ def process_content_piece(session: Session, piece: ContentPiece) -> None:
             _record_event(session, piece, stage, "completed", duration_seconds=time.monotonic() - stage_start)
             session.commit()
         piece.status = "delivered"
+        piece.was_refused = False  # esito riuscito: il segnale di rifiuto precedente non serve piu'
         _record_event(session, piece, "delivered", "completed")
         session.commit()
     except higgsfield_client.HiggsfieldNSFWBlockedError:
@@ -343,17 +346,43 @@ def process_content_piece(session: Session, piece: ContentPiece) -> None:
         session.commit()
     except claude_creative.ClaudeContentRefusedError as exc:
         # Idem: rifiuto di policy di Claude (osservato su contenuto
-        # sessualizzato ravvicinato, vedi §12.8/§16), non un errore tecnico
-        # e non recuperabile con un retry sullo stesso input.
+        # sessualizzato ravvicinato, vedi §12.8/§16), non un errore tecnico.
+        # Non recuperabile con un retry IDENTICO: was_refused=True fa si'
+        # che il prossimo retry_content_piece scriva un prompt piu'
+        # conservativo (vedi claude_creative.write_carousel_prompts/
+        # write_talking_video_prompt, avoid_refusal).
         logger.warning("ContentPiece %s: Claude ha rifiutato il contenuto: %s", piece.id, exc)
         session.rollback()
         piece.status = "content_refused"
+        piece.was_refused = True
         session.commit()
     except Exception as exc:
         logger.exception("Errore nello stadio '%s' per ContentPiece %s", piece.status, piece.id)
         session.rollback()
         piece.status = "error"
         session.commit()
+
+
+def retry_content_piece(session: Session, piece_id: int) -> dict:
+    """Riprova UN pezzo specifico da capo (dallo stadio image_regen), senza
+    dover rilanciare l'intero piano — richiesto dall'utente (15/07/2026):
+    oggi un pezzo fallito si sbloccava solo rilanciando `run_once` su tutto
+    il piano. Azzera asset/caption gia' generati (altrimenti
+    _stage_image_regen li accoderebbe invece di sostituirli); NON tocca
+    cost_credits_actual, il ledger deve riflettere ogni consumo reale anche
+    sui tentativi falliti."""
+    piece = session.get(ContentPiece, piece_id)
+    if piece is None:
+        raise ValueError(f"ContentPiece {piece_id} inesistente")
+    if piece.status == "delivered":
+        raise ValueError(f"ContentPiece {piece_id} gia' consegnato, nessun retry necessario")
+    piece.generated_assets = []
+    piece.caption = None
+    piece.hashtags = []
+    piece.status = "reference_ready"
+    session.commit()
+    process_content_piece(session, piece)
+    return {"id": piece.id, "status": piece.status}
 
 
 def run_once(session: Session, *, plan_id: int | None = None) -> dict:
@@ -389,6 +418,11 @@ def run_once(session: Session, *, plan_id: int | None = None) -> dict:
             ContentPiece.reference_id.is_not(None),
             PlanWeek.status == "approvato",
         )
+        # priorita' piu' alta prima (default 0 per tutti = ordine FIFO per id,
+        # comportamento invariato finche' nessuno la tocca); vedi
+        # engine.py/api.py bump_piece_priority, richiesto dall'utente
+        # (15/07/2026) per poter promuovere un pezzo specifico in coda.
+        .order_by(ContentPiece.priority.desc(), ContentPiece.id)
     )
     if plan_id is not None:
         pending_stmt = pending_stmt.where(ContentPiece.plan_week_id == plan_id)

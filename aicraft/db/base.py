@@ -55,8 +55,14 @@ def _run_additive_migrations() -> None:
             "content_pieces",
             {
                 "requested_source_category": "VARCHAR",
+                "was_refused": "BOOLEAN",
+                "quality_rating": "INTEGER",
+                "priority": "INTEGER",
             },
         )
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE content_pieces SET was_refused = 0 WHERE was_refused IS NULL"))
+            conn.execute(text("UPDATE content_pieces SET priority = 0 WHERE priority IS NULL"))
     if "plan_weeks" in inspector.get_table_names():
         _add_missing_columns(
             "plan_weeks",

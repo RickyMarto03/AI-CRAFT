@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from aicraft.budget import ledger
 from aicraft.db.base import Base
-from aicraft.db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
+from aicraft.db.models import CharacterVersion, ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
 from aicraft.desktop import api as api_mod
 from aicraft.production import higgsfield_client
 from aicraft.reference_sync import sync as reference_sync
@@ -43,6 +43,10 @@ def api(tmp_path, monkeypatch):
         higgsfield_client, "estimate_cost",
         lambda job_type, **kw: {"text2image_soul_v2": 0.12, "seedance_2_0": 10.0}[job_type],
     )
+    # backup.run_backup_safe legge config.DATABASE_URL direttamente (non la
+    # sessione di test sopra): senza questo mock, production_run finirebbe
+    # per copiare il DB REALE del progetto in data/backups/ ad ogni test.
+    monkeypatch.setattr(api_mod.backup, "run_backup_safe", lambda: {"ok": True, "path": "finto"})
     return api_mod.Api()
 
 
@@ -942,3 +946,307 @@ def test_open_piece_folder_apre_cartella_dentro_delivery_dir(api, monkeypatch, t
     assert r["ok"]
     assert r["folder"] == str(folder)
     assert calls == [["open", str(folder)]]
+
+
+def test_health_check_reporta_binari_e_credenziali(api, monkeypatch, tmp_path):
+    monkeypatch.setattr(api_mod.shutil, "which", lambda name: "/usr/bin/fake" if name == "higgsfield" else None)
+    creds = tmp_path / "creds.json"
+    creds.write_text("{}")
+    monkeypatch.setattr(api_mod.config, "HIGGSFIELD_CLI_BIN", "higgsfield")
+    monkeypatch.setattr(api_mod.config, "CLAUDE_CLI_BIN", "claude")
+    monkeypatch.setattr(api_mod.config, "GOOGLE_SERVICE_ACCOUNT_FILE", str(creds))
+
+    r = api.health_check()
+
+    assert r["ok"]
+    assert r["higgsfield_cli"] is True
+    assert r["claude_cli"] is False
+    assert r["google_sheet_credentials"] is True
+    assert r["all_ok"] is False
+
+
+def test_global_search_trova_reference_pezzi_e_backlog(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.add_backlog_note("qualita", "Fedelta posa carosello da migliorare", "vedi test dedicato")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        session.add_all([
+            ReferenceItem(source_url="https://www.instagram.com/p/SEARCH/", status="ready", original_caption="una fedelta incredibile"),
+            ContentPiece(profile=profile, content_type="carosello", status="delivered", caption="fedelta al top"),
+        ])
+        session.commit()
+
+    r = api.global_search("fedelta")
+
+    assert r["ok"]
+    assert len(r["references"]) == 1
+    assert len(r["pieces"]) == 1
+    assert len(r["backlog"]) == 1
+
+
+def test_global_search_query_vuota_ritorna_liste_vuote(api):
+    r = api.global_search("   ")
+    assert r["ok"]
+    assert r["references"] == [] and r["pieces"] == [] and r["backlog"] == []
+
+
+def test_today_events_solo_eventi_di_oggi(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        session.add(piece)
+        session.commit()
+        session.add_all([
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="completed", duration_seconds=1.2),
+            ContentPieceEvent(content_piece_id=piece.id, stage="qa", status="completed", duration_seconds=0.5, timestamp=dt.datetime.utcnow() - dt.timedelta(days=3)),
+        ])
+        session.commit()
+
+    r = api.today_events()
+
+    assert r["ok"]
+    assert len(r["events"]) == 1
+    assert r["events"][0]["stage"] == "image_regen"
+    assert r["events"][0]["profile_nome"] == "Ruby"
+
+
+def test_retry_content_piece_endpoint_chiama_engine(api, monkeypatch):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="error")
+        session.add(piece)
+        session.commit()
+        piece_id = piece.id
+
+    seen = {}
+
+    def fake_retry(session, pid):
+        seen["piece_id"] = pid
+        return {"id": pid, "status": "delivered"}
+
+    monkeypatch.setattr(api_mod.production_engine, "retry_content_piece", fake_retry)
+
+    r = api.retry_content_piece(piece_id)
+
+    assert r["ok"]
+    assert seen["piece_id"] == piece_id
+    assert r["retry"]["status"] == "delivered"
+
+
+def test_set_piece_quality_valida_range(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        session.add(piece)
+        session.commit()
+        piece_id = piece.id
+
+    fuori_range = api.set_piece_quality(piece_id, 9)
+    assert fuori_range["ok"] is False
+
+    ok = api.set_piece_quality(piece_id, 4)
+    assert ok["ok"]
+    assert ok["quality_rating"] == 4
+    with api_mod.SessionLocal() as session:
+        assert session.get(ContentPiece, piece_id).quality_rating == 4
+
+
+def test_bump_piece_priority_assegna_massimo_piu_uno(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        basso = ContentPiece(profile=profile, content_type="carosello", status="reference_ready", priority=0)
+        alto = ContentPiece(profile=profile, content_type="carosello", status="reference_ready", priority=3)
+        session.add_all([basso, alto])
+        session.commit()
+        basso_id = basso.id
+
+    r = api.bump_piece_priority(basso_id)
+
+    assert r["ok"]
+    assert r["priority"] == 4
+
+
+def test_plan_allocation_preview_non_modifica_nulla(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    plan_id = api.create_plan(1, "2026-07-20", "2026-07-26")["plan"]["id"]
+    api.plan_set_cell(plan_id, "carosello", "lun", 1)
+    with api_mod.SessionLocal() as session:
+        session.add(ReferenceItem(
+            source_url="https://www.instagram.com/p/ALLOC/", source_tab="CAROSELLI", source_category="BOOBS",
+            content_type_hint="carosello", week_start=dt.date(2026, 7, 13), week_end=dt.date(2026, 7, 19),
+            status="ready", frame_paths=["/tmp/a.jpg"],
+        ))
+        session.commit()
+
+    r = api.plan_allocation_preview(plan_id)
+
+    assert r["ok"]
+    assert r["would_assign"] == 1
+    assert r["would_miss"] == 0
+    assert r["pieces"][0]["reference_category"] == "BOOBS"
+    # nessuna modifica salvata: la reference resta non assegnata
+    with api_mod.SessionLocal() as session:
+        piece = session.query(ContentPiece).filter(ContentPiece.plan_week_id == plan_id).one()
+        assert piece.reference_id is None
+
+
+def test_import_reference_url_endpoint(api, monkeypatch):
+    seen = {}
+
+    def fake_import(url, *, source_tab, source_category, content_type_hint):
+        seen.update(url=url, source_tab=source_tab, source_category=source_category, content_type_hint=content_type_hint)
+        return {"id": 1, "status": "ready", "error_message": None}
+
+    monkeypatch.setattr(api_mod.reference_sync, "import_single_reference", fake_import)
+
+    r = api.import_reference_url("https://www.instagram.com/p/X/", "CAROSELLI", "BOOBS", "carosello")
+
+    assert r["ok"]
+    assert seen == {
+        "url": "https://www.instagram.com/p/X/", "source_tab": "CAROSELLI",
+        "source_category": "BOOBS", "content_type_hint": "carosello",
+    }
+    assert r["import"]["status"] == "ready"
+
+
+def test_cost_estimate_vs_actual_aggrega_per_tipo_e_ignora_incompleti(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        session.add_all([
+            ContentPiece(profile=profile, content_type="video_balletti", status="delivered", cost_credits_estimated=16.0, cost_credits_actual=18.0),
+            ContentPiece(profile=profile, content_type="video_balletti", status="delivered", cost_credits_estimated=16.0, cost_credits_actual=18.0),
+            ContentPiece(profile=profile, content_type="carosello", status="delivered", cost_credits_estimated=0.36),  # solo stima, escluso
+        ])
+        session.commit()
+
+    r = api.cost_estimate_vs_actual()
+
+    assert r["ok"]
+    assert "carosello" not in r["by_content_type"]
+    b = r["by_content_type"]["video_balletti"]
+    assert b["count"] == 2
+    assert b["estimated"] == 32.0
+    assert b["actual"] == 36.0
+    assert b["delta"] == 4.0
+
+
+def test_scheduler_status_legge_i_log(api, monkeypatch, tmp_path):
+    monkeypatch.setattr(api_mod.config, "DATA_DIR", tmp_path)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "weekly-reference-sync.out.log").write_text("riga1\nriga2\n")
+
+    r = api.scheduler_status()
+
+    assert r["ok"]
+    assert r["out"] is not None
+    assert "riga2" in r["out"]["tail"]
+    assert r["err"] is None
+
+
+def test_character_history_filtra_per_creator(api):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            CharacterVersion(creator_nome="Ruby", physical_description="v1", mandatory_additions="m", negative_prompt="n"),
+            CharacterVersion(creator_nome="Ruby", physical_description="v2", mandatory_additions="m", negative_prompt="n"),
+            CharacterVersion(creator_nome="Altra", physical_description="v1", mandatory_additions="m", negative_prompt="n"),
+        ])
+        session.commit()
+
+    tutte = api.character_history()
+    assert len(tutte["versions"]) == 3
+
+    solo_ruby = api.character_history("Ruby")
+    assert len(solo_ruby["versions"]) == 2
+    assert solo_ruby["versions"][0]["physical_description"] == "v2"  # piu' recente prima
+
+
+def test_stage_duration_stats_calcola_media_solo_su_completati(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        session.add(piece)
+        session.commit()
+        session.add_all([
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="completed", duration_seconds=2.0),
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="completed", duration_seconds=4.0),
+            ContentPieceEvent(content_piece_id=piece.id, stage="image_regen", status="started"),  # ignorato: nessuna duration
+        ])
+        session.commit()
+
+    r = api.stage_duration_stats()
+
+    assert r["ok"]
+    stage = next(s for s in r["stages"] if s["stage"] == "image_regen")
+    assert stage["count"] == 2
+    assert stage["avg_seconds"] == 3.0
+
+
+def test_list_backlog_ricerca_per_testo(api):
+    api.add_backlog_note("qualita", "Fedelta posa carosello", "descrizione")
+    api.add_backlog_note("funzionalita", "Export CSV", "")
+
+    r = api.list_backlog(status="tutti", search="fedelta")
+
+    assert r["ok"]
+    assert len(r["notes"]) == 1
+    assert r["notes"][0]["title"] == "Fedelta posa carosello"
+
+
+def test_budget_status_espone_alert_soglia(api, monkeypatch):
+    monkeypatch.setattr(api_mod.config, "BUDGET_ALERT_THRESHOLD", 50.0)
+
+    basso = api.budget_status()
+    assert basso["budget_alert"] is True
+    assert basso["budget_alert_threshold"] == 50.0
+
+    api.budget_topup(100.0)
+    alto = api.budget_status()
+    assert alto["budget_alert"] is False
+
+
+def test_run_backup_endpoint_passa_dal_modulo_backup(api, monkeypatch):
+    monkeypatch.setattr(api_mod.backup, "run_backup", lambda: {"ok": True, "path": "/tmp/finto.db", "kept": 1, "removed": 0})
+
+    r = api.run_backup()
+
+    assert r["ok"]
+    assert r["path"] == "/tmp/finto.db"
+
+
+def test_production_preview_espone_dettaglio_pezzi(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    api.budget_topup(100.0)
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+        ref = ReferenceItem(
+            source_url="https://www.instagram.com/p/DRY/", source_tab="CAROSELLI", source_category="BOOBS",
+            content_type_hint="carosello", status="ready", frame_paths=["/tmp/a.jpg"],
+        )
+        piece = ContentPiece(profile=profile, plan_week=plan, reference=ref, content_type="carosello", status="reference_ready")
+        session.add_all([plan, ref, piece])
+        session.commit()
+
+    r = api.production_preview()
+
+    assert r["ok"]
+    assert len(r["pieces"]) == 1
+    assert r["pieces"][0]["content_type"] == "carosello"
+    assert r["pieces"][0]["reference_category"] == "BOOBS"
+    assert r["pieces"][0]["estimated_cost"] == pytest.approx(r["estimated_cost"])

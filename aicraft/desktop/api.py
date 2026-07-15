@@ -17,19 +17,25 @@ import calendar
 import datetime as dt
 import functools
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
-from .. import backlog, config, reporting
+from sqlalchemy import func, or_
+
+from .. import backlog, backup, config, reporting, scheduler
 from ..budget import estimate as budget_estimate
 from ..budget import ledger as budget_ledger
 from ..budget import sync as budget_sync
 from ..budget.errors import BudgetInsufficientError
 from ..db.base import SessionLocal, init_db
-from ..db.models import ContentPiece, ContentPieceEvent, CreditLedger, PlanWeek, Profile, ReferenceItem
+from ..db.models import (
+    CharacterVersion, ContentPiece, ContentPieceEvent, CreditLedger,
+    ImprovementNote, PlanWeek, Profile, ReferenceItem,
+)
 from ..planning import plan as planning
 from ..planning.quota import GIORNI_VALIDI
-from ..production import engine as production_engine
+from ..production import character, engine as production_engine
 from ..production import pipeline_spec
 from ..profiles import manager as profiles
 from ..reference_sync import allocator, sync as reference_sync
@@ -160,6 +166,7 @@ def _list_references(session, *, status=None, category=None, search=None, limit=
     items = []
     for r in page:
         thumb = _reference_thumbnail(r)
+        preview_kind, preview_url = _reference_preview(r)
         items.append({
             "id": r.id,
             "url": r.source_url,
@@ -173,12 +180,43 @@ def _list_references(session, *, status=None, category=None, search=None, limit=
             "content_type_hint": r.content_type_hint,
             "has_local_media": bool(r.local_video_path or r.frame_paths),
             "thumbnail_url": f"file://{thumb}" if thumb else None,
+            "preview_kind": preview_kind,
+            "preview_url": preview_url,
             "error_message": r.error_message,
             "download_attempts": r.download_attempts or 0,
             "max_download_attempts": reference_sync.MAX_DOWNLOAD_ATTEMPTS,
             "retryable": r.status in _ERROR_STATUSES and (r.download_attempts or 0) < reference_sync.MAX_DOWNLOAD_ATTEMPTS,
         })
     return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+
+def _reference_preview(item: ReferenceItem) -> tuple:
+    """(kind, file-url) del materiale a piena risoluzione per la lightbox
+    QA — a differenza di `_reference_thumbnail` (sempre un'immagine, anche
+    per i video), qui i video puntano al file video reale cosi' la lightbox
+    puo' riprodurlo invece di mostrare solo un frame fisso."""
+    if item.local_video_path and Path(item.local_video_path).exists():
+        return "video", f"file://{item.local_video_path}"
+    if item.frame_paths:
+        p = Path(item.frame_paths[0])
+        if p.exists():
+            return "image", f"file://{p}"
+    return None, None
+
+
+def _piece_preview(piece: ContentPiece) -> tuple:
+    """(kind, file-url) dell'ultimo asset generato/consegnato, per la
+    lightbox QA sui contenuti generati (vedi _reference_preview)."""
+    assets = piece.generated_assets or []
+    for a in reversed(assets):
+        p = Path(a)
+        if p.suffix.lower() in (".mp4", ".mov", ".webm") and p.exists():
+            return "video", f"file://{p}"
+    for a in reversed(assets):
+        p = Path(a)
+        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and p.exists():
+            return "image", f"file://{p}"
+    return None, None
 
 
 def _reference_folder(item: ReferenceItem) -> Path | None:
@@ -367,6 +405,11 @@ def _reference_stats(session) -> dict:
 
 
 def _production_preview(session, plan_id=None) -> dict:
+    """SENZA COSTI: nessuna chiamata Higgsfield/Claude reale, solo stime
+    (budget_estimate) e dati gia' in DB. `pieces`: dettaglio per singolo
+    pezzo (categoria/costo stimato) — aggiunto il 15/07/2026 su richiesta
+    dell'utente per vedere COSA verrebbe prodotto, non solo il totale
+    aggregato, prima di lanciare una produzione reale ("dry-run")."""
     q = (
         session.query(ContentPiece)
         .join(PlanWeek, ContentPiece.plan_week_id == PlanWeek.id)
@@ -382,10 +425,18 @@ def _production_preview(session, plan_id=None) -> dict:
     cache: dict = {}
     stima = 0.0
     by_type: dict = {}
+    piece_rows = []
     for p in pieces:
         c = budget_estimate.estimate_content_type(p.content_type, cache=cache)
         stima += c
         by_type[p.content_type] = by_type.get(p.content_type, 0) + 1
+        piece_rows.append({
+            "id": p.id,
+            "content_type": p.content_type,
+            "estimated_cost": c,
+            "reference_category": p.reference.source_category if p.reference else None,
+            "priority": p.priority,
+        })
     balance = budget_ledger.current_balance(session)
     return {
         "ready_count": len(pieces),
@@ -393,6 +444,223 @@ def _production_preview(session, plan_id=None) -> dict:
         "estimated_cost": stima,
         "balance": balance,
         "covers": balance >= stima,
+        "pieces": piece_rows,
+    }
+
+
+def _plan_allocation_preview(session, plan_id: int) -> dict:
+    """Simula assign_references_to_plan SENZA assegnare/persistere nulla:
+    mostra quali reference (categoria/settimana/caption) verrebbero
+    effettivamente scelte se si assegnasse ora — richiesto dall'utente
+    (15/07/2026) per vedere il MIX di reference prima di premere Approva,
+    non solo il costo aggregato (gia' coperto da _production_preview).
+    Riusa allocator.select_candidates, una query pura senza side-effect."""
+    pieces = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.plan_week_id == plan_id, ContentPiece.reference_id.is_(None))
+        .order_by(ContentPiece.id)
+        .all()
+    )
+    used_ids: set = set()
+    rows = []
+    for piece in pieces:
+        candidates = allocator.select_candidates(
+            session,
+            content_type=piece.content_type,
+            requested_category=piece.requested_source_category,
+            exclude_ids=used_ids,
+        )
+        chosen = candidates[0] if candidates else None
+        if chosen:
+            used_ids.add(chosen.id)
+        rows.append({
+            "piece_id": piece.id,
+            "content_type": piece.content_type,
+            "would_assign": chosen is not None,
+            "reference_id": chosen.id if chosen else None,
+            "reference_category": chosen.source_category if chosen else None,
+            "reference_week": chosen.week_start.isoformat() if chosen and chosen.week_start else None,
+            "reference_caption": (chosen.original_caption or "")[:80] if chosen else None,
+        })
+    already_assigned = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.plan_week_id == plan_id, ContentPiece.reference_id.is_not(None))
+        .count()
+    )
+    return {
+        "already_assigned": already_assigned,
+        "would_assign": sum(1 for r in rows if r["would_assign"]),
+        "would_miss": sum(1 for r in rows if not r["would_assign"]),
+        "pieces": rows,
+    }
+
+
+def _global_search(session, query: str) -> dict:
+    """Ricerca cross-tab (Libreria/Produzione/Backlog) in un unico colpo —
+    richiesto dall'utente (15/07/2026): prima bisognava sapere in quale tab
+    cercare. Filtro SQL LIKE (case-insensitive via ilike, portabile su
+    SQLite), limitato a 20 risultati per sezione."""
+    needle = (query or "").strip()
+    if not needle:
+        return {"references": [], "pieces": [], "backlog": []}
+    like = f"%{needle}%"
+
+    refs = (
+        session.query(ReferenceItem)
+        .filter(or_(ReferenceItem.original_caption.ilike(like), ReferenceItem.source_url.ilike(like)))
+        .order_by(ReferenceItem.id.desc()).limit(20).all()
+    )
+    pieces = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.caption.ilike(like))
+        .order_by(ContentPiece.id.desc()).limit(20).all()
+    )
+    notes = (
+        session.query(ImprovementNote)
+        .filter(or_(ImprovementNote.title.ilike(like), ImprovementNote.description.ilike(like)))
+        .order_by(ImprovementNote.id.desc()).limit(20).all()
+    )
+    return {
+        "references": [
+            {"id": r.id, "url": r.source_url, "category": r.source_category, "caption": r.original_caption, "status": r.status}
+            for r in refs
+        ],
+        "pieces": [
+            {"id": p.id, "content_type": p.content_type, "status": p.status, "caption": p.caption}
+            for p in pieces
+        ],
+        "backlog": [
+            {"id": n.id, "title": n.title, "category": n.category, "status": n.status}
+            for n in notes
+        ],
+    }
+
+
+def _today_events(session) -> list:
+    """Log cronologico di TUTTI gli eventi di produzione (ContentPieceEvent)
+    di oggi, su tutti i profili — a differenza di `_today_agenda` (solo il
+    profilo attivo, solo cosa e' PIANIFICATO), questa e' una console di cosa
+    e' successo DAVVERO oggi, utile mentre una produzione lunga gira in
+    background. Richiesto dall'utente (15/07/2026)."""
+    today = dt.date.today()
+    start = dt.datetime.combine(today, dt.time.min)
+    end = dt.datetime.combine(today, dt.time.max)
+    events = (
+        session.query(ContentPieceEvent)
+        .filter(ContentPieceEvent.timestamp >= start, ContentPieceEvent.timestamp <= end)
+        .order_by(ContentPieceEvent.timestamp.desc())
+        .limit(50)
+        .all()
+    )
+    piece_ids = {e.content_piece_id for e in events}
+    pieces = (
+        {p.id: p for p in session.query(ContentPiece).filter(ContentPiece.id.in_(piece_ids)).all()}
+        if piece_ids else {}
+    )
+    rows = []
+    for e in events:
+        piece = pieces.get(e.content_piece_id)
+        rows.append({
+            "id": e.id,
+            "piece_id": e.content_piece_id,
+            "content_type": piece.content_type if piece else None,
+            "profile_nome": piece.profile.nome if piece and piece.profile else None,
+            "stage": e.stage,
+            "status": e.status,
+            "duration_seconds": e.duration_seconds,
+            "detail": e.detail,
+            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+        })
+    return rows
+
+
+def _cost_estimate_vs_actual(session) -> dict:
+    """Confronta, per content_type, stima (budget_estimate, al momento
+    dell'approvazione) vs costo reale (Higgsfield, al momento della
+    produzione) sui pezzi che hanno ENTRAMBI i valori — per tenere
+    aggiornate le stime col costo reale osservato nel tempo (scostamenti
+    reali gia' trovati, es. motion control 18cr non 16 stimati a voce).
+    Richiesto dall'utente (15/07/2026)."""
+    rows = (
+        session.query(ContentPiece)
+        .filter(ContentPiece.cost_credits_estimated.is_not(None), ContentPiece.cost_credits_actual.is_not(None))
+        .all()
+    )
+    by_type: dict = {}
+    for p in rows:
+        b = by_type.setdefault(p.content_type, {"count": 0, "estimated": 0.0, "actual": 0.0})
+        b["count"] += 1
+        b["estimated"] += p.cost_credits_estimated or 0.0
+        b["actual"] += p.cost_credits_actual or 0.0
+    for b in by_type.values():
+        b["delta"] = b["actual"] - b["estimated"]
+        b["delta_pct"] = (b["delta"] / b["estimated"] * 100) if b["estimated"] else None
+    return by_type
+
+
+def _scheduler_status() -> dict:
+    """Stato dell'ultimo run dello scheduler settimanale (LaunchAgent) letto
+    dai file di log gia' scritti da `aicraft.cli references sync-policy`
+    (vedi scheduler.py) — richiesto dall'utente (15/07/2026) per sapere se
+    l'ultimo giro automatico e' andato bene senza aprire un terminale."""
+    log_dir = config.DATA_DIR / "logs"
+
+    def _info(path: Path):
+        if not path.exists():
+            return None
+        stat = path.stat()
+        text = path.read_text(errors="replace")
+        return {
+            "last_modified": dt.datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+            "size_bytes": stat.st_size,
+            "tail": "\n".join(text.splitlines()[-20:]),
+        }
+
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{scheduler.DEFAULT_LABEL}.plist"
+    return {
+        "installed": plist_path.exists(),
+        "out": _info(log_dir / "weekly-reference-sync.out.log"),
+        "err": _info(log_dir / "weekly-reference-sync.err.log"),
+    }
+
+
+def _stage_duration_stats(session) -> list:
+    """Durata media per stadio (ContentPieceEvent.duration_seconds, solo
+    eventi "completed") — richiesto dall'utente (15/07/2026) per stimare
+    quanto impiega in media un talking/carosello dal prompt alla consegna,
+    usando dati reali gia' registrati invece di indovinare."""
+    rows = (
+        session.query(ContentPieceEvent.stage, ContentPieceEvent.duration_seconds)
+        .filter(ContentPieceEvent.status == "completed", ContentPieceEvent.duration_seconds.is_not(None))
+        .all()
+    )
+    by_stage: dict = {}
+    for stage, duration in rows:
+        b = by_stage.setdefault(stage, {"count": 0, "total": 0.0})
+        b["count"] += 1
+        b["total"] += duration
+    return [
+        {"stage": stage, "count": b["count"], "avg_seconds": b["total"] / b["count"]}
+        for stage, b in sorted(by_stage.items())
+    ]
+
+
+def _health_check() -> dict:
+    """Controllo leggero e SENZA rete di cio' che serve per lavorare:
+    binari CLI in PATH, file di credenziali Google presente — richiesto
+    dall'utente (15/07/2026) per accorgersi subito all'avvio se qualcosa
+    non e' configurato, prima di lanciare una produzione reale su una
+    sessione rotta. Non chiama `higgsfield account status` (rete +
+    autenticazione, troppo lento/fragile per un check ad ogni avvio app);
+    quello resta un controllo esplicito separato (budget_sync)."""
+    higgsfield_ok = shutil.which(config.HIGGSFIELD_CLI_BIN) is not None
+    claude_ok = shutil.which(config.CLAUDE_CLI_BIN) is not None
+    sheet_ok = bool(config.GOOGLE_SERVICE_ACCOUNT_FILE) and Path(config.GOOGLE_SERVICE_ACCOUNT_FILE).exists()
+    return {
+        "higgsfield_cli": higgsfield_ok,
+        "claude_cli": claude_ok,
+        "google_sheet_credentials": sheet_ok,
+        "all_ok": higgsfield_ok and claude_ok and sheet_ok,
     }
 
 
@@ -406,6 +674,18 @@ class Api:
     @_endpoint
     def today_agenda(self, session):
         return _today_agenda(session)
+
+    @_endpoint
+    def today_events(self, session):
+        return {"events": _today_events(session)}
+
+    @_endpoint
+    def global_search(self, session, query):
+        return _global_search(session, query)
+
+    @_endpoint
+    def health_check(self, session):
+        return _health_check()
 
     # --- profili (Creator) ---
 
@@ -452,7 +732,11 @@ class Api:
     @_endpoint
     def budget_status(self, session, plan_id=None):
         balance = budget_ledger.current_balance(session)
-        data = {"balance": balance}
+        data = {
+            "balance": balance,
+            "budget_alert": balance < config.BUDGET_ALERT_THRESHOLD,
+            "budget_alert_threshold": config.BUDGET_ALERT_THRESHOLD,
+        }
         if plan_id is not None:
             plan = session.get(PlanWeek, int(plan_id))
             if plan is not None:
@@ -486,6 +770,10 @@ class Api:
     @_endpoint
     def monthly_projection(self, session, window_days=14):
         return _monthly_projection(session, window_days=int(window_days))
+
+    @_endpoint
+    def cost_estimate_vs_actual(self, session):
+        return {"by_content_type": _cost_estimate_vs_actual(session)}
 
     # --- referenze (Libreria) ---
 
@@ -542,6 +830,13 @@ class Api:
         ids = [r.id for r in q.all()]
         result = reference_sync.retry_all(ids)
         return {"retry_all": result}
+
+    @_endpoint
+    def import_reference_url(self, session, url, source_tab, source_category, content_type_hint):
+        result = reference_sync.import_single_reference(
+            url, source_tab=source_tab, source_category=source_category, content_type_hint=content_type_hint,
+        )
+        return {"import": result}
 
     @_endpoint
     def open_reference_folder(self, session, reference_id):
@@ -628,6 +923,13 @@ class Api:
         }
 
     @_endpoint
+    def plan_allocation_preview(self, session, plan_id):
+        plan = session.get(PlanWeek, int(plan_id))
+        if plan is None:
+            return {"ok": False, "error": f"Piano {plan_id} inesistente"}
+        return _plan_allocation_preview(session, plan.id)
+
+    @_endpoint
     def duplicate_plan(self, session, plan_id, week_start, week_end):
         source = session.get(PlanWeek, int(plan_id))
         if source is None:
@@ -701,6 +1003,10 @@ class Api:
             return {"ok": False, "error": "Nessun contenuto pronto da produrre."}
         if not preview["covers"]:
             return {"ok": False, "error": "Budget insufficiente per avviare la produzione reale.", **preview}
+        # Backup DB prima di una produzione reale (spende crediti, tocca
+        # molte righe): richiesto dall'utente (15/07/2026), non blocca la
+        # produzione se il backup stesso fallisce.
+        backup.run_backup_safe()
         result = production_engine.run_once(session, plan_id=(int(plan_id) if plan_id is not None else None))
         return {"preview_before": preview, "production": result}
 
@@ -715,6 +1021,7 @@ class Api:
         result = []
         for p in pieces:
             thumb = _piece_thumbnail(p)
+            preview_kind, preview_url = _piece_preview(p)
             result.append({
                 "id": p.id,
                 "content_type": p.content_type,
@@ -722,11 +1029,43 @@ class Api:
                 "profile_nome": p.profile.nome if p.profile else None,
                 "caption": p.caption,
                 "cost_credits_actual": p.cost_credits_actual,
+                "cost_credits_estimated": p.cost_credits_estimated,
                 "updated_at": p.updated_at.isoformat() if p.updated_at else None,
                 "thumbnail_url": f"file://{thumb}" if thumb else None,
+                "preview_kind": preview_kind,
+                "preview_url": preview_url,
                 "has_output": bool(p.generated_assets),
+                "retryable": p.status != "delivered",
+                "was_refused": p.was_refused,
+                "quality_rating": p.quality_rating,
+                "priority": p.priority,
             })
         return {"pieces": result}
+
+    @_endpoint
+    def retry_content_piece(self, session, piece_id):
+        result = production_engine.retry_content_piece(session, int(piece_id))
+        return {"retry": result}
+
+    @_endpoint
+    def set_piece_quality(self, session, piece_id, rating):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        rating = int(rating)
+        if not (1 <= rating <= 5):
+            return {"ok": False, "error": "Il voto deve essere tra 1 e 5"}
+        piece.quality_rating = rating
+        return {"piece_id": piece.id, "quality_rating": rating}
+
+    @_endpoint
+    def bump_piece_priority(self, session, piece_id):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        max_priority = session.query(func.max(ContentPiece.priority)).scalar() or 0
+        piece.priority = max_priority + 1
+        return {"piece_id": piece.id, "priority": piece.priority}
 
     @_endpoint
     def open_piece_folder(self, session, piece_id):
@@ -769,9 +1108,9 @@ class Api:
     # --- backlog (Da migliorare) ---
 
     @_endpoint
-    def list_backlog(self, session, status="aperto"):
+    def list_backlog(self, session, status="aperto", search=None):
         status_filter = None if status == "tutti" else status
-        notes = backlog.list_notes(session, status=status_filter)
+        notes = backlog.list_notes(session, status=status_filter, search=search)
         return {"notes": [
             {
                 "id": n.id, "created_at": n.created_at.isoformat(), "category": n.category,
@@ -790,6 +1129,37 @@ class Api:
         backlog.set_status(session, int(note_id), status)
         return {}
 
+    # --- sistema / manutenzione ---
+
+    @_endpoint
+    def run_backup(self, session):
+        return backup.run_backup()
+
+    @_endpoint
+    def scheduler_status(self, session):
+        return _scheduler_status()
+
+    @_endpoint
+    def character_history(self, session, creator_nome=None):
+        q = session.query(CharacterVersion)
+        if creator_nome:
+            q = q.filter(CharacterVersion.creator_nome == creator_nome)
+        rows = q.order_by(CharacterVersion.id.desc()).all()
+        return {"versions": [
+            {
+                "id": v.id, "creator_nome": v.creator_nome,
+                "physical_description": v.physical_description,
+                "mandatory_additions": v.mandatory_additions,
+                "negative_prompt": v.negative_prompt,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+            }
+            for v in rows
+        ]}
+
+    @_endpoint
+    def stage_duration_stats(self, session):
+        return {"stages": _stage_duration_stats(session)}
+
     # --- costanti utili al frontend ---
 
     @_endpoint
@@ -804,4 +1174,6 @@ class Api:
 
 def get_api() -> Api:
     init_db()
+    with SessionLocal() as session:
+        character.record_versions_if_changed(session)
     return Api()

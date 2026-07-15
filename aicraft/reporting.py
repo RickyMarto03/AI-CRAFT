@@ -13,6 +13,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import config
 from .budget import ledger
 from .db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
 
@@ -23,8 +24,11 @@ def _count_by(session: Session, column) -> dict:
 
 
 def overview(session: Session) -> dict:
+    balance = ledger.current_balance(session)
     return {
-        "saldo_crediti": ledger.current_balance(session),
+        "saldo_crediti": balance,
+        "budget_alert": balance < config.BUDGET_ALERT_THRESHOLD,
+        "budget_alert_threshold": config.BUDGET_ALERT_THRESHOLD,
         "profili": [
             {"id": p.id, "nome": p.nome, "tipo": p.tipo_contenuto, "attivo": p.attivo}
             for p in session.scalars(select(Profile).order_by(Profile.id))

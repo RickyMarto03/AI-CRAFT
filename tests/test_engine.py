@@ -205,6 +205,51 @@ def test_process_content_piece_claude_rifiuta_marca_content_refused(session, tmp
     engine_module.process_content_piece(session, piece)
 
     assert piece.status == "content_refused"
+    assert piece.was_refused is True
+
+
+def test_retry_content_piece_azzera_asset_e_passa_avoid_refusal(session, tmp_path, monkeypatch):
+    """retry_content_piece riparte da image_regen (asset/caption azzerati) e
+    passa avoid_refusal=True quando il pezzo era stato rifiutato in
+    precedenza, cosi' Claude scrive un prompt piu' prudente invece di
+    ripetere lo stesso input che darebbe lo stesso rifiuto."""
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    frame_paths = [str(tmp_path / "foto_0.jpg")]
+    reference = ReferenceItem(
+        source_url="https://www.instagram.com/p/RETRY_PIECE/",
+        status="ready", frame_paths=frame_paths, source_category="GENERAL",
+    )
+    piece = ContentPiece(
+        profile=profile, reference=reference, content_type="carosello", status="content_refused",
+        was_refused=True, generated_assets=["/tmp/vecchia_immagine.jpg"], caption="vecchia caption",
+    )
+    session.add_all([creator, profile, reference, piece])
+    session.commit()
+
+    seen = {}
+
+    def fake_write_carousel_prompts(**kwargs):
+        seen["avoid_refusal"] = kwargs.get("avoid_refusal")
+        raise engine_module.claude_creative.ClaudeContentRefusedError("rifiuto simulato di nuovo")
+
+    monkeypatch.setattr(engine_module.claude_creative, "write_carousel_prompts", fake_write_carousel_prompts)
+
+    result = engine_module.retry_content_piece(session, piece.id)
+
+    assert seen["avoid_refusal"] is True
+    assert result["status"] == "content_refused"
+
+
+def test_retry_content_piece_rifiuta_pezzo_gia_consegnato(session):
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+    session.add_all([creator, profile, piece])
+    session.commit()
+
+    with pytest.raises(ValueError):
+        engine_module.retry_content_piece(session, piece.id)
 
 
 def test_process_content_piece_tipo_sconosciuto_marca_errore(session):
@@ -489,7 +534,7 @@ def test_carosello_usa_carousel_selection_e_genera_una_foto_per_prompt(session, 
 
     seen_photo_paths = {}
 
-    def fake_write_carousel_prompts(*, photo_paths, character, content_type, source_category):
+    def fake_write_carousel_prompts(*, photo_paths, character, content_type, source_category, avoid_refusal=False):
         seen_photo_paths["value"] = photo_paths
         return [f"prompt per {p}" for p in photo_paths]
 
@@ -596,3 +641,29 @@ def test_run_once_produce_solo_piani_approvati(session, monkeypatch):
 
     # solo il pezzo del piano approvato
     assert processed == [piece_appr.id]
+
+
+def test_run_once_produce_prima_i_pezzi_con_priorita_piu_alta(session, monkeypatch):
+    creator = Creator(nome="Test Creator")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    plan = PlanWeek(profile=profile, week_start=dt.date(2026, 7, 20), week_end=dt.date(2026, 7, 26), status="approvato")
+    ref = ReferenceItem(
+        source_url="https://www.instagram.com/p/PRIO/", status="ready", frame_paths=["/tmp/foto.jpg"],
+    )
+    piece_normale = ContentPiece(profile=profile, content_type="carosello", plan_week=plan, status="reference_ready", reference=ref, priority=0)
+    piece_urgente = ContentPiece(profile=profile, content_type="carosello", plan_week=plan, status="reference_ready", priority=5)
+    session.add_all([creator, profile, plan, ref, piece_normale, piece_urgente])
+    session.commit()
+    # piece_urgente non ha reference_id valorizzato tramite relazione ref
+    # separata: qui basta che compaia PRIMA nell'ordine, non serve produrlo
+    # per davvero (process_content_piece e' mockato sotto).
+    piece_urgente.reference_id = ref.id
+    session.commit()
+
+    processed = []
+    monkeypatch.setattr(engine_module, "process_content_piece", lambda s, p: processed.append(p.id))
+
+    engine_module.run_once(session)
+
+    assert processed[0] == piece_urgente.id
+    assert processed[1] == piece_normale.id

@@ -1,7 +1,7 @@
 import datetime as dt
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from aicraft.db.base import Base
@@ -32,6 +32,44 @@ def test_upsert_reference_salva_settimana_posizione_e_categoria(db_session):
     assert item.sheet_order == 12
     assert item.sheet_row == 3
     assert item.sheet_col == 1
+
+
+def test_upsert_reference_segnala_conflitto_quando_cambia_tab_o_categoria(db_session):
+    ref_v1 = SheetReference(
+        url="https://www.instagram.com/p/DUP/", source_tab="CAROSELLI", source_category="BOOBS",
+        content_type_hint="carosello", week_start=dt.date(2026, 7, 13), week_end=dt.date(2026, 7, 19),
+        sheet_row_id="CAROSELLI!R1C1", sheet_order=1, sheet_row=1, sheet_col=1,
+    )
+    sync.upsert_reference(db_session, ref_v1)
+    db_session.commit()
+
+    ref_v2 = SheetReference(
+        url="https://www.instagram.com/p/DUP/", source_tab="VIRAL GENERAL", source_category="TALKING",
+        content_type_hint="video", week_start=dt.date(2026, 7, 13), week_end=dt.date(2026, 7, 19),
+        sheet_row_id="VIRAL GENERAL!R5C2", sheet_order=5, sheet_row=5, sheet_col=2,
+    )
+    conflicts = []
+    item = sync.upsert_reference(db_session, ref_v2, conflicts=conflicts)
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["from"] == "CAROSELLI/BOOBS"
+    assert conflicts[0]["to"] == "VIRAL GENERAL/TALKING"
+    assert item.source_category == "TALKING"  # comportamento invariato: l'ultimo giro vince
+
+
+def test_upsert_reference_stessa_categoria_non_e_un_conflitto(db_session):
+    ref = SheetReference(
+        url="https://www.instagram.com/p/SAME/", source_tab="CAROSELLI", source_category="BOOBS",
+        content_type_hint="carosello", week_start=dt.date(2026, 7, 13), week_end=dt.date(2026, 7, 19),
+        sheet_row_id="CAROSELLI!R1C1", sheet_order=1, sheet_row=1, sheet_col=1,
+    )
+    sync.upsert_reference(db_session, ref)
+    db_session.commit()
+
+    conflicts = []
+    sync.upsert_reference(db_session, ref, conflicts=conflicts)
+
+    assert conflicts == []
 
 
 def test_media_folder_per_reference_usa_settimana_tab_categoria():
@@ -154,10 +192,75 @@ def test_cleanup_old_references_cancella_solo_reference_e_scollega_content(tmp_p
     assert not old_file.exists()
 
 
+def test_cleanup_old_references_elimina_anche_la_thumbnail_video_in_cache(tmp_path, db_session, monkeypatch):
+    media_root = tmp_path / "media"
+    monkeypatch.setattr(sync.config, "MEDIA_DIR", media_root)
+    video_dir = media_root / "2026-W20" / "VIRAL_GENERAL" / "TALKING" / "old"
+    video_dir.mkdir(parents=True)
+    video_file = video_dir / "clip.mp4"
+    video_file.write_text("video finto")
+    thumb_file = video_dir / "clip_thumb.jpg"
+    thumb_file.write_text("thumb finta")
+
+    ref = ReferenceItem(
+        source_url="old-video",
+        source_tab="VIRAL GENERAL",
+        source_category="TALKING",
+        content_type_hint="video",
+        week_start=dt.date(2026, 5, 11),
+        week_end=dt.date(2026, 5, 17),
+        status="ready",
+        local_video_path=str(video_file),
+    )
+    db_session.add(ref)
+    db_session.commit()
+
+    deleted = sync.cleanup_old_references(db_session, today=dt.date(2026, 7, 15))
+    db_session.commit()
+
+    assert deleted == 1
+    assert not video_file.exists()
+    assert not thumb_file.exists()  # senza il fix restava orfana su disco
+
+
 def _isolated_session_factory(tmp_path, name):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def test_import_single_reference_crea_e_scarica(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "import1.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    def fake_process_item(session, item, **kw):
+        item.status = "ready"
+
+    monkeypatch.setattr(sync, "process_item", fake_process_item)
+
+    result = sync.import_single_reference(
+        "https://www.instagram.com/p/MANUAL/",
+        source_tab="viral general", source_category="talking", content_type_hint="video",
+    )
+
+    assert result["status"] == "ready"
+    with TestSession() as session:
+        saved = session.scalar(select(ReferenceItem).where(ReferenceItem.source_url == "https://www.instagram.com/p/MANUAL/"))
+        assert saved is not None
+        assert saved.source_tab == "VIRAL GENERAL"
+        assert saved.source_category == "TALKING"
+        assert saved.week_start is not None  # settimana corrente, non None
+
+
+def test_import_single_reference_content_type_hint_non_valido_solleva_errore():
+    with pytest.raises(ValueError):
+        sync.import_single_reference("https://x/", source_tab="A", source_category="B", content_type_hint="foto")
+
+
+def test_import_single_reference_url_vuoto_solleva_errore():
+    with pytest.raises(ValueError):
+        sync.import_single_reference("   ", source_tab="A", source_category="B", content_type_hint="video")
 
 
 def test_retry_reference_carica_item_e_chiama_process_item(monkeypatch, tmp_path):

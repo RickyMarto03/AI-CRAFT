@@ -186,4 +186,28 @@ input:focus, select:focus { outline: none; border-color: var(--blue); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.ok { border-left: 3px solid var(--green); }
+
+/* lightbox QA (anteprima foto/video a piena risoluzione) */
+.lightbox-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex; align-items: center; justify-content: center;
+  z-index: 80; padding: 40px; cursor: zoom-out;
+}
+.lightbox-content { max-width: 90vw; max-height: 88vh; cursor: default; }
+.lightbox-content img, .lightbox-content video { max-width: 90vw; max-height: 88vh; border-radius: 10px; display: block; }
+.lightbox-close {
+  position: fixed; top: 20px; right: 26px; z-index: 81; background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text); border-radius: 999px; width: 34px; height: 34px; cursor: pointer; font-size: 16px;
+}
+
+/* pannello ricerca globale (topbar) */
+.gsearch { position: relative; }
+.gsearch input { width: 190px; }
+.gsearch-panel {
+  position: absolute; top: calc(100% + 8px); right: 0; width: 380px; max-height: 60vh; overflow-y: auto;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  z-index: 60; padding: 10px;
+}
+.gsearch-section-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-faint); margin: 10px 6px 6px; }
+.gsearch-item { padding: 8px 6px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+.gsearch-item:hover { background: var(--bg-card-2); }
 .toast.err { border-left: 3px solid var(--red); color: var(--red); }

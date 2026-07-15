@@ -21,6 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 
 @dataclass(frozen=True)
 class CharacterProfile:
@@ -61,3 +64,40 @@ CHARACTERS_BY_CREATOR = {
 
 def get_character_for_creator(creator_nome: str) -> Optional[CharacterProfile]:
     return CHARACTERS_BY_CREATOR.get(creator_nome)
+
+
+def record_versions_if_changed(session: Session) -> int:
+    """Snapshotta ogni CharacterProfile in CharacterVersion se e' diverso
+    dall'ultimo snapshot registrato per quella creator (o se non ce n'e'
+    ancora uno) — costruisce uno storico di "com'era prima" pur restando il
+    character una costante di codice, non editabile da UI. Chiamata da
+    init_db a ogni avvio: costo trascurabile (una query per creator), scrive
+    solo quando davvero cambia qualcosa. Ritorna quanti snapshot nuovi sono
+    stati scritti."""
+    from ..db.models import CharacterVersion  # import locale: evita un ciclo con db.models
+
+    written = 0
+    for char in CHARACTERS_BY_CREATOR.values():
+        last = session.scalars(
+            select(CharacterVersion)
+            .where(CharacterVersion.creator_nome == char.creator_nome)
+            .order_by(CharacterVersion.id.desc())
+            .limit(1)
+        ).first()
+        changed = (
+            last is None
+            or last.physical_description != char.physical_description
+            or last.mandatory_additions != char.mandatory_additions
+            or last.negative_prompt != char.negative_prompt
+        )
+        if changed:
+            session.add(CharacterVersion(
+                creator_nome=char.creator_nome,
+                physical_description=char.physical_description,
+                mandatory_additions=char.mandatory_additions,
+                negative_prompt=char.negative_prompt,
+            ))
+            written += 1
+    if written:
+        session.commit()
+    return written

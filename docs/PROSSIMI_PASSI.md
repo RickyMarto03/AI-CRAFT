@@ -31,7 +31,12 @@ dover rileggere un'intera chat che non ha mai visto.
 link, 170 pronte), redesign Libreria con thumbnail reali + sezione "Contenuti generati" (§22),
 riprova tutti/andamento leggibile/fix scroll (§23), ricerca+paginazione Libreria, retry
 automatico stale, prompt Claude in inglese, regola confine filesystem (§24), tetto di 2 tentativi
-di download prima di "non disponibile" definitivo (§25).
+di download prima di "non disponibile" definitivo (§25), 21 mini-feature richieste in blocco:
+retry singolo pezzo, retry con feedback sui rifiuti, lightbox QA, voto qualita', coda
+riordinabile, dry-run dettagliato, preview allocator, import manuale link, avviso duplicati,
+pulizia thumbnail orfane, alert budget, stima vs reale, backup DB, log scheduler in UI,
+versioning character, statistiche tempo per stadio, ricerca globale + ricerca backlog,
+health-check, timeline "oggi" unificata (§26).
 
 **L'utente ha confermato che il workflow di generazione per caroselli e video talking è
 "perfetto"** (visto sui 2 output reali del test §17) — non serve piu' lavorarci sopra a meno di
@@ -45,10 +50,8 @@ talking ~36cr/8s, balletti ~18cr/10s — con 170 reference pronte un piano ampio
 centinaia di crediti, va dimensionato insieme all'utente, non scelto a caso).
 
 Altri candidati minori (non richiesti esplicitamente, bassa priorita'):
-- **Produzione — retry singolo pezzo**: oggi non c'e' un "riprova questo pezzo" per un
-  ContentPiece finito in `error` dalla UI — bisogna rilanciare l'intero piano.
-- 38 reference `download_error` nelle ultime 2 settimane, ritentabili (vedi §22) — non ancora
-  ritentate.
+- 38 reference `download_error` nelle ultime 2 settimane, ritentabili (ora anche con "Riprova
+  tutti", vedi §23/§25) — non ancora ritentate.
 - Punti gia' noti in backlog/checklist precedenti (vedi sezione "Da migliorare" dell'app):
   verifiche Higgsfield reali ancora mancanti (`video_references` su seedance_2_0, `image_reference`
   remoto su motion control), riconciliazione job dopo un errore `--wait` (vedi §17).
@@ -88,6 +91,34 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 notte, parte 5 (sessione Claude — 21 mini-feature richieste in blocco)
+
+- L'utente ha chiesto di implementare TUTTE le 22 idee di miglioramento proposte a fine sessione
+  precedente, tranne l'export CSV (considerato superfluo per ora). Fatto in un'unica sessione
+  lunga, backend + frontend + test per ognuna. Vedi doc §26 per il dettaglio completo per area
+  (Reference/Libreria, Produzione/qualita', Costi/budget, Robustezza/manutenzione, Ricerca,
+  Configurazione).
+- 3 nuove colonne su `content_pieces` (`was_refused`, `quality_rating`, `priority`, migrazione
+  additiva con backfill) + nuova tabella `character_versions`. Nuovo modulo `aicraft/backup.py`.
+  ~20 nuovi endpoint API. Vista "Oggi" arricchita con banner budget/health-check + timeline
+  eventi; niente nuove tab in nav, per non frammentare la navigazione.
+- **Decisioni di scope prese senza fermarsi a chiedere** (nessuna ambigua abbastanza da bloccare):
+  la ricerca globale non fa deep-link alla riga esatta, solo cambio tab; il "dry-run" e la
+  "preview allocator" sono stati accorpati/estesi su endpoint gia' esistenti invece di crearne di
+  nuovi ridondanti; il versioning del character resta un log automatico di sola lettura (il
+  character stesso resta una costante di codice, decisione gia' presa in precedenza — vedi
+  character.py), non e' diventato editabile da UI.
+- **Attenzione trovata e corretta durante l'implementazione**: il backup automatico agganciato a
+  `production_run`/`run_policy_once` leggeva `config.DATABASE_URL` direttamente (non la sessione
+  di test), quindi senza mock i test avrebbero copiato il DB REALE del progetto in
+  `data/backups/` ad ogni run — mockato `backup.run_backup_safe` nel fixture `api` di
+  `test_desktop_api.py` prima di scrivere i test, e ripulite le copie gia' create per errore
+  durante lo sviluppo.
+- 236 test verdi (35 nuovi). Vedi doc §26.
+- **Prossimo passo esplicito, ancora MAI ESEGUITO**: generare su scala reale con le reference
+  pronte — l'utente ha detto esplicitamente che lo fara' quando avra' finito completamente il
+  progetto, non proporlo come prossimo passo finche' non lo chiede lui.
 
 ### 15/07/2026 notte, parte 4 (sessione Claude — tetto tentativi download)
 

@@ -2,7 +2,7 @@
 
 import datetime as dt
 
-from aicraft import reporting
+from aicraft import config, reporting
 from aicraft.budget import ledger
 from aicraft.db.models import ContentPiece, Creator, PlanWeek, Profile, ReferenceItem
 
@@ -43,3 +43,17 @@ def test_overview_aggrega_stati(db_session):
     testo = reporting.format_overview(ov)
     assert "Ruby" in testo
     assert "100.00" in testo
+
+
+def test_overview_segnala_budget_alert_sotto_soglia(db_session, monkeypatch):
+    monkeypatch.setattr(config, "BUDGET_ALERT_THRESHOLD", 50.0)
+
+    ov = reporting.overview(db_session)
+    assert ov["budget_alert"] is True
+    assert ov["budget_alert_threshold"] == 50.0
+
+    ledger.record_topup(db_session, credits=100.0)
+    db_session.commit()
+
+    ov = reporting.overview(db_session)
+    assert ov["budget_alert"] is False

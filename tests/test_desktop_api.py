@@ -630,3 +630,68 @@ def test_reference_weekly_trend_aggrega_per_settimana(api):
     assert weeks["2026-07-13"]["error"] == 1
     # ordine cronologico, non decrescente
     assert [w["week_start"] for w in r["weeks"]] == sorted(weeks.keys())
+
+
+def test_ledger_history_ritorna_voci_recenti_con_content_type(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        session.add(piece)
+        session.commit()
+        ledger.record_topup(session, credits=100.0)
+        ledger.record_consumption(session, credits=0.36, motivo="image_regen", content_piece_id=piece.id)
+        session.commit()
+
+    r = api.ledger_history(limit=10)
+
+    assert r["ok"]
+    assert len(r["entries"]) == 2
+    consumo = next(e for e in r["entries"] if e["delta_credits"] < 0)
+    assert consumo["content_type"] == "carosello"
+    assert consumo["motivo"] == "image_regen"
+
+
+def test_spend_by_content_type_aggrega_solo_i_consumi(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        p1 = ContentPiece(profile=profile, content_type="carosello", status="delivered")
+        p2 = ContentPiece(profile=profile, content_type="video_talking", status="delivered")
+        session.add_all([p1, p2])
+        session.commit()
+        ledger.record_topup(session, credits=100.0)
+        ledger.record_consumption(session, credits=0.36, motivo="image_regen", content_piece_id=p1.id)
+        ledger.record_consumption(session, credits=36.0, motivo="video_regen", content_piece_id=p2.id)
+        session.commit()
+
+    r = api.spend_by_content_type()
+
+    assert r["ok"]
+    assert r["totals"] == {"carosello": pytest.approx(0.36), "video_talking": pytest.approx(36.0)}
+    assert "ricarica" not in r["totals"]  # la ricarica (delta positivo) non e' un consumo
+
+
+def test_monthly_projection_calcola_media_giornaliera(api, monkeypatch):
+    fixed_now = dt.datetime(2026, 7, 15, 12, 0, 0)
+
+    class FixedDatetime(dt.datetime):
+        @classmethod
+        def utcnow(cls):
+            return fixed_now
+
+    monkeypatch.setattr(api_mod.dt, "datetime", FixedDatetime)
+
+    with api_mod.SessionLocal() as session:
+        ledger.record_topup(session, credits=100.0)
+        ledger.record_consumption(session, credits=14.0, motivo="test")
+        session.commit()
+
+    r = api.monthly_projection(window_days=14)
+
+    assert r["ok"]
+    assert r["spent_in_window"] == pytest.approx(14.0)
+    assert r["daily_avg"] == pytest.approx(1.0)
+    assert r["projected_30_days"] == pytest.approx(30.0)

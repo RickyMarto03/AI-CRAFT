@@ -502,7 +502,12 @@ VIEWS.libreria = async () => {
 VIEWS.costi = async () => {
   await ensurePlan();
   const planId = state.currentPlan ? state.currentPlan.id : null;
-  const r = await call('budget_status', planId);
+  const [r, history, spendByType, projection] = await Promise.all([
+    call('budget_status', planId),
+    call('ledger_history', 30),
+    call('spend_by_content_type'),
+    call('monthly_projection', 14),
+  ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   let hero = '';
   if (r.plan_cost != null) {
@@ -516,16 +521,45 @@ VIEWS.costi = async () => {
         <div class="tile accent-${covers ? 'blue' : 'red'}"><div class="t-label">Copertura</div><div class="t-value num">${fmt(r.coverage)}</div></div>
       </div></div>`;
   }
+
+  const projTile = projection.ok
+    ? `<div class="tile accent-blue"><div class="t-label">Proiezione 30gg</div><div class="t-value num">${fmt(projection.projected_30_days)}</div><div class="t-sub">~${fmt(projection.daily_avg)} CR/giorno, ultimi ${projection.window_days}gg</div></div>`
+    : '';
+
+  const spendTotal = spendByType.ok ? Object.values(spendByType.totals).reduce((a, b) => a + b, 0) : 0;
+  const spendRows = spendByType.ok && Object.keys(spendByType.totals).length
+    ? Object.entries(spendByType.totals).sort((a, b) => b[1] - a[1]).map(([ct, credits]) => {
+        const pct = spendTotal ? (credits / spendTotal * 100) : 0;
+        return `<div style="margin-bottom:8px">
+          <div class="row" style="margin-bottom:3px"><span class="muted" style="flex:1">${CT_LABELS[ct] || esc(ct)}</span><span class="num">${fmt(credits)} CR</span></div>
+          <div style="height:6px;border-radius:3px;background:var(--bg-card-2);overflow:hidden"><div style="width:${pct.toFixed(1)}%;height:100%;background:${CT_COLORS[ct] || '#4c8bf5'}"></div></div>
+        </div>`;
+      }).join('')
+    : '<div class="empty">Nessuna spesa registrata ancora.</div>';
+
+  const historyRows = history.ok && history.entries.length
+    ? history.entries.map((e) => `<div class="row" style="padding:5px 0">
+        <span class="faint" style="width:150px">${esc((e.timestamp || '').replace('T', ' ').slice(0, 19))}</span>
+        <span class="muted" style="flex:1">${esc(e.motivo)}${e.content_type ? ' · ' + (CT_LABELS[e.content_type] || esc(e.content_type)) : ''}</span>
+        <span class="num" style="color:${e.delta_credits < 0 ? 'var(--red)' : 'var(--green)'}">${e.delta_credits > 0 ? '+' : ''}${fmt(e.delta_credits)}</span>
+      </div>`).join('')
+    : '<div class="empty">Nessun movimento ancora.</div>';
+
   return head('Costi', 'Budget e crediti (fonte: CreditLedger)') + hero + `
-    <div class="grid cols-3" style="margin-top:16px">
+    <div class="grid cols-4" style="margin-top:16px">
       <div class="tile accent-${r.balance < 0 ? 'red' : 'green'}"><div class="t-label">Saldo attuale</div><div class="t-value num">${fmt(r.balance)}</div><div class="t-sub">crediti</div></div>
+      ${projTile}
       <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Ricarica crediti</div>
         <div class="row"><input id="topupAmount" type="number" placeholder="es. 100" style="flex:1" />
           <button class="btn blue" data-action="budget-topup">Ricarica</button></div></div>
       <div class="card"><div class="muted" style="font-weight:700;margin-bottom:10px">Allinea a Higgsfield</div>
         <div class="row"><span class="faint" style="flex:1">Legge il saldo reale e registra la rettifica.</span>
           <button class="btn" data-action="budget-sync">Sincronizza</button></div></div>
-    </div>`;
+    </div>
+    <div class="section-title">Spesa per tipo contenuto</div>
+    <div class="card">${spendRows}</div>
+    <div class="section-title">Storico movimenti (ultimi 30)</div>
+    <div class="card">${historyRows}</div>`;
 };
 
 /* ============ Vista: Sistema ============ */

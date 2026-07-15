@@ -735,3 +735,25 @@ Secondo dei 4 blocchi di arricchimento richiesti dall'utente.
 
 **Test**: `test_desktop_api.py` (`content_stats` su `list_profiles`, `reference_weekly_trend`
 aggrega e ordina cronologicamente). 178 test verdi.
+
+## 21. Arricchimento Costi: storico movimenti, spesa per tipo, proiezione — FATTO (15/07/2026, sessione Claude)
+
+Ultimo dei 4 blocchi di arricchimento richiesti dall'utente.
+
+- **`ledger_history(limit=50)`**: ultimi movimenti `CreditLedger` (timestamp, delta, motivo),
+  arricchiti col `content_type` del `ContentPiece` collegato quando c'e' (le ricariche/rettifiche
+  non hanno un pezzo associato). Prefetch dei content_type con UNA query `IN (...)`, non N+1.
+- **`spend_by_content_type()`**: somma dei soli CONSUMI (delta negativi con un pezzo collegato) per
+  content_type — le ricariche non sono "spesa" e non hanno un content_type, quindi sono escluse a
+  monte dal filtro, non serve un caso speciale.
+- **`monthly_projection(window_days=14)`**: spesa media giornaliera nella finestra recente,
+  estrapolata su 30 giorni — proiezione grezza (nessuna stagionalita'), utile solo per farsi
+  un'idea del ritmo attuale, non un forecast accurato.
+- UI: tab Costi con tile "Proiezione 30gg", card "Spesa per tipo contenuto" (barre proporzionali),
+  sezione "Storico movimenti" (ultimi 30, con content_type quando disponibile).
+
+**Test**: `test_desktop_api.py` — `ledger_history` include content_type, `spend_by_content_type`
+esclude le ricariche, `monthly_projection` con `datetime.utcnow` fissato via monkeypatch per un
+calcolo deterministico della finestra. 181 test verdi in tutto il progetto — **tutti e 4 i blocchi
+di arricchimento richiesti dall'utente (Produzione/checkpoint, Piano, Creator/Libreria, Costi)
+sono FATTI**.

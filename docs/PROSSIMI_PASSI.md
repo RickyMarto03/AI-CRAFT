@@ -27,14 +27,16 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**Fatto**: tracking a checkpoint (§18), Piano arricchito (§19), Creator/Libreria arricchiti (§20).
-
-**Prossimo, nell'ordine di priorita' scelto dall'utente** (non ancora iniziato):
-1. **Costi**: storico movimenti `CreditLedger` nel tempo, grafico spesa per tipo contenuto,
-   proiezione consumo mensile.
-2. **Produzione — retry singolo pezzo** (rimasto indietro, minore priorita'): oggi non c'e' un
-   "riprova questo pezzo" per un ContentPiece finito in `error` dalla UI — bisogna rilanciare
-   l'intero piano.
+**TUTTI E 4 i blocchi di arricchimento richiesti dall'utente sono FATTI**: tracking a checkpoint
+(§18), Piano (§19), Creator/Libreria (§20), Costi (§21). Non c'e' un prossimo task ovvio senza
+una decisione dell'utente — CHIEDI prima di continuare. Candidati minori rimasti (non richiesti
+esplicitamente, emersi come idee minori durante il lavoro):
+- **Produzione — retry singolo pezzo**: oggi non c'e' un "riprova questo pezzo" per un
+  ContentPiece finito in `error` dalla UI — bisogna rilanciare l'intero piano.
+- Punti gia' noti in backlog/checklist precedenti (vedi sezione "Da migliorare" dell'app):
+  fedelta posa/outfit caroselli, verifiche Higgsfield reali ancora mancanti (`video_references` su
+  seedance_2_0, `image_reference` remoto su motion control), riconciliazione job dopo un errore
+  `--wait` (vedi §17).
 
 ## Intenzioni discusse in chat, non ancora implementate
 
@@ -71,6 +73,16 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 sera, parte 6 (sessione Claude — Costi arricchito, tutti i 4 blocchi completati)
+
+- `ledger_history`, `spend_by_content_type` (esclude ricariche a monte, non un caso speciale),
+  `monthly_projection` (media giornaliera su una finestra, estrapolata a 30gg — proiezione grezza).
+- UI: tile proiezione, barre spesa per tipo, storico movimenti in Costi.
+- 181 test verdi. Vedi doc §21.
+- **Tutti e 4 i blocchi di arricchimento richiesti dall'utente sono FATTI** (checkpoint/Produzione,
+  Piano, Creator/Libreria, Costi). Prossima sessione: chiedere all'utente cosa fare dopo, non
+  scegliere in autonomia — vedi "Task su cui lavorare adesso" sopra per i candidati minori.
 
 ### 15/07/2026 sera, parte 5 (sessione Claude — Creator/Libreria arricchiti)
 

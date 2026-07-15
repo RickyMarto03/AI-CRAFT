@@ -26,7 +26,7 @@ from ..budget import ledger as budget_ledger
 from ..budget import sync as budget_sync
 from ..budget.errors import BudgetInsufficientError
 from ..db.base import SessionLocal, init_db
-from ..db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile, ReferenceItem
+from ..db.models import ContentPiece, ContentPieceEvent, CreditLedger, PlanWeek, Profile, ReferenceItem
 from ..planning import plan as planning
 from ..planning.quota import GIORNI_VALIDI
 from ..production import engine as production_engine
@@ -195,6 +195,67 @@ def _reference_weekly_trend(session, *, weeks: int = 8) -> list:
     return list(reversed(ordered))  # cronologico, piu' vecchia prima
 
 
+def _content_type_by_piece_id(session, piece_ids: set) -> dict:
+    if not piece_ids:
+        return {}
+    rows = session.query(ContentPiece.id, ContentPiece.content_type).filter(ContentPiece.id.in_(piece_ids)).all()
+    return {pid: ct for pid, ct in rows}
+
+
+def _ledger_history(session, *, limit: int = 50) -> list:
+    rows = session.query(CreditLedger).order_by(CreditLedger.id.desc()).limit(limit).all()
+    piece_ids = {r.content_piece_id for r in rows if r.content_piece_id is not None}
+    content_types = _content_type_by_piece_id(session, piece_ids)
+    return [
+        {
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "delta_credits": r.delta_credits,
+            "motivo": r.motivo,
+            "content_piece_id": r.content_piece_id,
+            "content_type": content_types.get(r.content_piece_id),
+        }
+        for r in rows
+    ]
+
+
+def _spend_by_content_type(session) -> dict:
+    rows = (
+        session.query(CreditLedger)
+        .filter(CreditLedger.delta_credits < 0, CreditLedger.content_piece_id.is_not(None))
+        .all()
+    )
+    piece_ids = {r.content_piece_id for r in rows}
+    content_types = _content_type_by_piece_id(session, piece_ids)
+    totals: dict = {}
+    for r in rows:
+        ct = content_types.get(r.content_piece_id)
+        if ct is None:
+            continue
+        totals[ct] = totals.get(ct, 0.0) + abs(r.delta_credits)
+    return totals
+
+
+def _monthly_projection(session, *, window_days: int = 14) -> dict:
+    """Proiezione di consumo mensile: spesa media giornaliera nella finestra
+    recente, estrapolata su 30 giorni. Una stima grezza (nessuna
+    stagionalita'), utile solo per farsi un'idea del ritmo attuale."""
+    cutoff = dt.datetime.utcnow() - dt.timedelta(days=window_days)
+    rows = (
+        session.query(CreditLedger)
+        .filter(CreditLedger.delta_credits < 0, CreditLedger.timestamp >= cutoff)
+        .all()
+    )
+    spent = sum(abs(r.delta_credits) for r in rows)
+    daily_avg = spent / window_days if window_days else 0.0
+    return {
+        "window_days": window_days,
+        "spent_in_window": spent,
+        "daily_avg": daily_avg,
+        "projected_30_days": daily_avg * 30,
+    }
+
+
 def _reference_stats(session) -> dict:
     rows = session.query(ReferenceItem).all()
     by_status: dict = {}
@@ -351,6 +412,18 @@ class Api:
         result = budget_sync.sync_from_higgsfield(session)
         result["balance"] = budget_ledger.current_balance(session)
         return result
+
+    @_endpoint
+    def ledger_history(self, session, limit=50):
+        return {"entries": _ledger_history(session, limit=int(limit))}
+
+    @_endpoint
+    def spend_by_content_type(self, session):
+        return {"totals": _spend_by_content_type(session)}
+
+    @_endpoint
+    def monthly_projection(self, session, window_days=14):
+        return _monthly_projection(session, window_days=int(window_days))
 
     # --- referenze (Libreria) ---
 

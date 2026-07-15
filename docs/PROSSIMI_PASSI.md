@@ -92,6 +92,21 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
 
+### 15/07/2026 notte, parte 6 (sessione Claude — fix PATH health-check CLI Claude)
+
+- L'utente ha segnalato uno screenshot dell'app con "CLI Claude — non trovato" nell'health-check
+  appena aggiunto (§26), mentre Higgsfield risultava ok. Causa reale: `claude` vive solo in
+  `~/.npm-global/bin` sulla sua macchina; `higgsfield` e' raggiungibile anche da
+  `/opt/homebrew/bin`, quasi sempre presente nel PATH minimale ereditato da un'app GUI macOS
+  (PyWebView via `avvia.command`), a differenza del PATH completo di una shell interattiva.
+- Non era solo un bug dell'health-check: lo stesso rischio vale per le chiamate `subprocess`
+  vere di `run_headless` — un'app GUI senza quella cartella nel PATH potrebbe fallire a invocare
+  Claude durante la produzione reale, in silenzio, molto peggio di un badge rosso in Sistema.
+- Fix: `config._augment_path_for_gui_apps()`, eseguita all'import di `config.py`, aggiunge al
+  PATH del processo le posizioni comuni dei CLI installati dall'utente ma spesso assenti dal PATH
+  di una GUI (`~/.npm-global/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) senza
+  richiedere modifiche a `.zshrc`/`.zprofile`. 239 test verdi. Vedi doc §27.
+
 ### 15/07/2026 notte, parte 5 (sessione Claude — 21 mini-feature richieste in blocco)
 
 - L'utente ha chiesto di implementare TUTTE le 22 idee di miglioramento proposte a fine sessione

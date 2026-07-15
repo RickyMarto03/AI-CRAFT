@@ -5,6 +5,39 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _augment_path_for_gui_apps() -> None:
+    """Le app GUI avviate su macOS (PyWebView via `avvia.command`, o un
+    doppio click) NON ereditano sempre il PATH completo della shell
+    interattiva dell'utente — in particolare i prefix npm custom (es.
+    `~/.npm-global/bin`, dove vive il CLI `claude` installato con
+    `@anthropic-ai/claude-code`) restano irraggiungibili anche se `which
+    claude` funziona nel Terminale normale. Bug reale trovato il
+    15/07/2026: l'health-check segnalava "CLI Claude non trovato" mentre
+    `higgsfield` risultava "ok" solo perche' quest'ultimo era raggiungibile
+    ANCHE da /opt/homebrew/bin — stesso rischio silenzioso per le vere
+    chiamate `subprocess` di run_headless/higgsfield_client, non solo per
+    l'health-check. Aggiunge le posizioni comuni al PATH del processo
+    Python (una volta sola, solo se esistono e non sono gia' presenti)
+    invece di richiedere all'utente di modificare .zshrc/.zprofile."""
+    home = Path.home()
+    candidates = [
+        home / ".npm-global" / "bin",
+        home / ".local" / "bin",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+    ]
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate.is_dir() and candidate_str not in parts:
+            parts.append(candidate_str)
+    os.environ["PATH"] = os.pathsep.join(parts)
+
+
+_augment_path_for_gui_apps()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 DATA_DIR = Path(os.getenv("AICRAFT_DATA_DIR", BASE_DIR / "data"))

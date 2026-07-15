@@ -995,3 +995,30 @@ nuova tabella `character_versions` (creata automaticamente da `create_all`, non 
 funzione nuova elencata sopra, inclusi i casi di errore (rating fuori range, retry su pezzo
 consegnato, backup senza DB reale). Verificata anche la migrazione contro il DB reale del
 progetto (colonne aggiunte, tabella creata, primo snapshot character scritto al primo avvio).
+
+## 27. Fix PATH per app GUI: CLI Claude non trovato nell'health-check — FATTO (15/07/2026, sessione Claude)
+
+**Bug reale trovato subito dopo il §26**: l'health-check appena aggiunto segnalava "CLI Claude
+non trovato" mentre "CLI Higgsfield" risultava ok. Causa: `claude` (installato via npm,
+`@anthropic-ai/claude-code`) vive SOLO in `~/.npm-global/bin/claude` sulla macchina dell'utente;
+`higgsfield` invece e' raggiungibile ANCHE da `/opt/homebrew/bin/higgsfield`, che e' quasi sempre
+presente nel PATH minimale che le app GUI macOS (PyWebView avviato via `avvia.command`, o doppio
+click) ereditano — a differenza del PATH completo di una shell interattiva con `.zshrc` caricato.
+
+Non era solo un problema estetico dell'health-check: lo stesso rischio silenzioso vale per le
+VERE chiamate `subprocess` di `claude_creative.run_headless` — se il processo dell'app non vede
+`~/.npm-global/bin` nel PATH, la produzione reale potrebbe fallire a invocare Claude, non solo
+l'health-check segnalarlo in ritardo.
+
+**Fix**: `config._augment_path_for_gui_apps()`, eseguita una volta all'import di `config.py`
+(prima ancora di definire `HIGGSFIELD_CLI_BIN`/`CLAUDE_CLI_BIN`, cosi' ogni `subprocess`/
+`shutil.which` nel progetto ne beneficia). Aggiunge al PATH del processo Python le posizioni
+comuni dove finiscono i CLI installati dall'utente ma spesso assenti dal PATH ereditato da una
+GUI (`~/.npm-global/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`), solo se la
+cartella esiste davvero e non e' gia' presente — nessuna modifica richiesta a `.zshrc`/
+`.zprofile` dell'utente.
+
+**Test**: `test_config.py` (nuovo file) — aggiunge una cartella home-relativa esistente, non
+duplica una cartella gia' presente, non aggiunge cartelle home-relative inesistenti. 239 test
+verdi in tutto il progetto. Verificato anche a mano che `health_check()` ora ritorna
+`all_ok: True` con lo stesso ambiente che prima falliva.

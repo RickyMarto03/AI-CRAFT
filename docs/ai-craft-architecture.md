@@ -757,3 +757,35 @@ esclude le ricariche, `monthly_projection` con `datetime.utcnow` fissato via mon
 calcolo deterministico della finestra. 181 test verdi in tutto il progetto — **tutti e 4 i blocchi
 di arricchimento richiesti dall'utente (Produzione/checkpoint, Piano, Creator/Libreria, Costi)
 sono FATTI**.
+
+## 22. Sync massivo ultime 2 settimane + redesign Libreria — FATTO (15/07/2026, sessione Claude)
+
+**Sync reale su scala**: scaricati per davvero 255 link (caroselli BOOBS/BOOTY/GENERAL + video
+TALKING/BALLETTI/LIPSYNC) delle settimane 06/07 e 13/07 — le stesse due settimane reali per tutte
+le categorie (non "le ultime 2 settimane presenti per categoria": TALKING/BALLETTI avevano già
+righe per la settimana 20/07, futura, che avrebbe sballato il confronto). Risultato: 170 pronte,
+38 fallite ma ritentabili (`download_error`, timeout/rate-limit transitori), 27 non più disponibili
+su Instagram (permanente). Nessun credito Higgsfield speso (solo download + trascrizione locale).
+
+**Redesign Libreria**, su feedback esplicito dell'utente ("scarna e non troppo comprensibile"):
+
+- **Thumbnail reali**: nuovo `_reference_thumbnail()` — per i caroselli usa direttamente la prima
+  foto già scaricata (zero costo aggiuntivo); per i video estrae UN frame via `ffmpeg` (non il
+  rilevatore DNN pesante di `frame_picker`, qui serve solo un'anteprima) e lo mette in cache su
+  disco accanto al video (`<nome>_thumb.jpg`) — generato una sola volta, i caricamenti successivi
+  sono istantanei. Stesso principio per i contenuti generati: `_piece_thumbnail()` prende la prima
+  immagine tra gli asset già scaricati in locale (nessuna generazione, riusa `_localize_asset`).
+- **Nuova sezione "Contenuti generati"**: la Libreria non mostrava mai l'output prodotto, solo il
+  materiale sorgente. Ora una sezione dedicata (riusa `list_content_pieces`, già esistente per
+  Produzione) con thumbnail, stato, costo, caption, e apertura cartella (`open_piece_folder`,
+  stesso schema di sicurezza di `open_reference_folder` ma verificato contro `DELIVERY_DIR`/
+  `WORK_DIR`).
+- **Rimossa la sezione "Ultimi scaricati"**: era un doppione della lista filtrabile sottostante,
+  contribuiva alla sensazione di sezione confusa più che aggiungere informazione.
+- **Più dati per riga**: caption originale (snippet), indicatore trascrizione presente, tipo
+  contenuto (video/carosello) — prima si vedevano solo categoria/stato/settimana.
+
+**Test**: `test_desktop_api.py` — thumbnail carosello (foto diretta) e video (ffmpeg reale, con
+skip se ffmpeg non disponibile, verificata anche la cache al secondo giro), thumbnail sui
+contenuti generati, `open_piece_folder` (inesistente/senza output/successo con percorso dentro
+`DELIVERY_DIR` verificato/mock di `subprocess.run`). 187 test verdi in tutto il progetto.

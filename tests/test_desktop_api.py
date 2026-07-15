@@ -3,6 +3,7 @@ finta). Verifica che i metodi chiamabili dal frontend ritornino i dati reali
 attesi e gestiscano gli errori come {ok: False}."""
 
 import datetime as dt
+import subprocess
 
 import pytest
 from sqlalchemy import create_engine
@@ -14,6 +15,21 @@ from aicraft.db.models import ContentPiece, ContentPieceEvent, PlanWeek, Profile
 from aicraft.desktop import api as api_mod
 from aicraft.production import higgsfield_client
 from aicraft.reference_sync import sync as reference_sync
+
+
+def _has_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def _make_video(path, duration=2):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=duration={duration}:size=160x120:rate=5", str(path)],
+        capture_output=True, check=True,
+    )
 
 
 @pytest.fixture
@@ -695,3 +711,108 @@ def test_monthly_projection_calcola_media_giornaliera(api, monkeypatch):
     assert r["spent_in_window"] == pytest.approx(14.0)
     assert r["daily_avg"] == pytest.approx(1.0)
     assert r["projected_30_days"] == pytest.approx(30.0)
+
+
+def test_list_references_thumbnail_carosello_e_foto_diretta(api, tmp_path):
+    foto = tmp_path / "foto.jpg"
+    foto.write_bytes(b"finta immagine")
+    with api_mod.SessionLocal() as session:
+        session.add(_seed_reference(status="ready", category="BOOBS", frame_paths=[str(foto)]))
+        session.commit()
+
+    r = api.list_references()
+
+    assert r["ok"]
+    assert r["references"][0]["thumbnail_url"] == f"file://{foto}"
+
+
+@pytest.mark.skipif(not _has_ffmpeg(), reason="ffmpeg non disponibile in questo ambiente")
+def test_list_references_thumbnail_video_genera_e_mette_in_cache(api, tmp_path):
+    video = tmp_path / "v.mp4"
+    _make_video(video)
+    with api_mod.SessionLocal() as session:
+        session.add(_seed_reference(status="ready", category="TALKING", local_video_path=str(video)))
+        session.commit()
+
+    r = api.list_references()
+
+    assert r["ok"]
+    thumb_url = r["references"][0]["thumbnail_url"]
+    assert thumb_url is not None
+    thumb_path = thumb_url.replace("file://", "")
+    assert thumb_path.endswith("_thumb.jpg")
+    import os
+    assert os.path.exists(thumb_path)
+
+    # secondo giro: usa la cache, non rigenera
+    mtime_before = os.path.getmtime(thumb_path)
+    api.list_references()
+    assert os.path.getmtime(thumb_path) == mtime_before
+
+
+def test_list_content_pieces_include_thumbnail(api, tmp_path):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    foto = tmp_path / "asset_01.png"
+    foto.write_bytes(b"finta")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        session.add(ContentPiece(
+            profile=profile, content_type="carosello", status="delivered",
+            generated_assets=[str(foto)],
+        ))
+        session.commit()
+
+    r = api.list_content_pieces()
+
+    assert r["ok"]
+    assert r["pieces"][0]["thumbnail_url"] == f"file://{foto}"
+    assert r["pieces"][0]["has_output"] is True
+
+
+def test_open_piece_folder_reference_inesistente(api):
+    r = api.open_piece_folder(999)
+    assert r["ok"] is False
+    assert "inesistente" in r["error"]
+
+
+def test_open_piece_folder_senza_output(api):
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="error")
+        session.add(piece)
+        session.commit()
+        piece_id = piece.id
+
+    r = api.open_piece_folder(piece_id)
+    assert r["ok"] is False
+    assert "Nessun file locale" in r["error"]
+
+
+def test_open_piece_folder_apre_cartella_dentro_delivery_dir(api, monkeypatch, tmp_path):
+    delivery_root = tmp_path / "delivery"
+    folder = delivery_root / "ruby-wilde" / "carosello" / "2026-07-20_lun_1"
+    folder.mkdir(parents=True)
+    asset = folder / "asset_01.png"
+    asset.write_bytes(b"finta")
+    monkeypatch.setattr(api_mod.config, "DELIVERY_DIR", delivery_root)
+
+    api.create_creator("Trinity")
+    api.create_profile(1, "Ruby", "misto")
+    with api_mod.SessionLocal() as session:
+        profile = session.query(Profile).one()
+        piece = ContentPiece(profile=profile, content_type="carosello", status="delivered", generated_assets=[str(asset)])
+        session.add(piece)
+        session.commit()
+        piece_id = piece.id
+
+    calls = []
+    monkeypatch.setattr(api_mod.subprocess, "run", lambda args, **kw: calls.append(args))
+
+    r = api.open_piece_folder(piece_id)
+
+    assert r["ok"]
+    assert r["folder"] == str(folder)
+    assert calls == [["open", str(folder)]]

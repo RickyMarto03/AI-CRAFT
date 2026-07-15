@@ -27,16 +27,28 @@ dover rileggere un'intera chat che non ha mai visto.
 
 ## Task su cui lavorare adesso
 
-**TUTTI E 4 i blocchi di arricchimento richiesti dall'utente sono FATTI**: tracking a checkpoint
-(§18), Piano (§19), Creator/Libreria (§20), Costi (§21). Non c'e' un prossimo task ovvio senza
-una decisione dell'utente — CHIEDI prima di continuare. Candidati minori rimasti (non richiesti
-esplicitamente, emersi come idee minori durante il lavoro):
+**Fatto**: i 4 blocchi di arricchimento (§18-§21), sync massivo ultime 2 settimane reali (255
+link, 170 pronte), redesign Libreria con thumbnail reali + sezione "Contenuti generati" (§22).
+
+**L'utente ha confermato che il workflow di generazione per caroselli e video talking è
+"perfetto"** (visto sui 2 output reali del test §17) — non serve piu' lavorarci sopra a meno di
+feedback futuro.
+
+**Prossimo passo naturale, MAI ESEGUITO FINORA**: con 170 reference pronte nelle ultime 2
+settimane, l'utente ha detto esplicitamente di essere pronto per generare su scala reale. Non
+partire in autonomia — chiedi quanti pezzi/che tipo vuole produrre nel primo giro su scala, per
+pianificare piano+budget prima di lanciare (costo per pezzo verificato: carosello ~0.36cr,
+talking ~36cr/8s, balletti ~18cr/10s — con 170 reference pronte un piano ampio potrebbe costare
+centinaia di crediti, va dimensionato insieme all'utente, non scelto a caso).
+
+Altri candidati minori (non richiesti esplicitamente, bassa priorita'):
 - **Produzione — retry singolo pezzo**: oggi non c'e' un "riprova questo pezzo" per un
   ContentPiece finito in `error` dalla UI — bisogna rilanciare l'intero piano.
+- 38 reference `download_error` nelle ultime 2 settimane, ritentabili (vedi §22) — non ancora
+  ritentate.
 - Punti gia' noti in backlog/checklist precedenti (vedi sezione "Da migliorare" dell'app):
-  fedelta posa/outfit caroselli, verifiche Higgsfield reali ancora mancanti (`video_references` su
-  seedance_2_0, `image_reference` remoto su motion control), riconciliazione job dopo un errore
-  `--wait` (vedi §17).
+  verifiche Higgsfield reali ancora mancanti (`video_references` su seedance_2_0, `image_reference`
+  remoto su motion control), riconciliazione job dopo un errore `--wait` (vedi §17).
 
 ## Intenzioni discusse in chat, non ancora implementate
 
@@ -73,6 +85,26 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 + `engine._localize_asset`. Vedi doc §16.
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
+
+### 15/07/2026 notte (sessione Claude — sync massivo + redesign Libreria)
+
+- **Confermato dall'utente**: il workflow caroselli+talking (§17) è "perfetto" sui 2 output reali
+  visti — non ci lavora piu' sopra, a meno di feedback futuro.
+- Spiegato in dettaglio come funziona oggi la selezione automatica delle reference (allocator
+  FIFO oldest-first su una finestra di 2 settimane "presenti", non calendario) — l'utente ha
+  confermato che questa logica va bene cosi', il vero interesse era capire il meccanismo per il
+  flusso "griglia piano -> approva -> genera", non cambiare la selezione.
+- **Sync reale su scala**: 255 link (caroselli+talking+balletti) delle settimane 06/07 e 13/07 —
+  stesse 2 settimane reali per tutte le categorie (non "ultime 2 presenti per categoria", che per
+  talking/balletti avrebbe incluso la settimana 20/07 futura). 170 pronte, 38 ritentabili, 27 non
+  disponibili. Nessun credito Higgsfield speso.
+- **Redesign Libreria**: thumbnail reali (foto diretta per caroselli, frame ffmpeg in cache per
+  video), nuova sezione "Contenuti generati" (prima invisibile in Libreria), rimossa la sezione
+  duplicata "Ultimi scaricati", piu' dati per riga (caption, trascrizione, tipo). Vedi doc §22.
+- 187 test verdi.
+- **Prossimo passo esplicito**: l'utente ha detto di essere pronto a generare su scala reale con
+  le 170 reference pronte — MAI FATTO FINORA un giro di produzione su scala (solo singoli test).
+  Da pianificare insieme (quanti pezzi, che tipo, budget) prima di lanciare, non scegliere da soli.
 
 ### 15/07/2026 sera, parte 6 (sessione Claude — Costi arricchito, tutti i 4 blocchi completati)
 

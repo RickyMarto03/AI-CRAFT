@@ -148,8 +148,10 @@ def _list_references(session, *, status=None, category=None, limit=50) -> list:
     if category:
         q = q.filter(ReferenceItem.source_category == category)
     rows = sorted(q.all(), key=lambda r: r.downloaded_at or r.imported_at, reverse=True)[:limit]
-    return [
-        {
+    result = []
+    for r in rows:
+        thumb = _reference_thumbnail(r)
+        result.append({
             "id": r.id,
             "url": r.source_url,
             "status": r.status,
@@ -157,12 +159,14 @@ def _list_references(session, *, status=None, category=None, limit=50) -> list:
             "source_category": r.source_category,
             "week_start": r.week_start.isoformat() if r.week_start else None,
             "downloaded_at": r.downloaded_at.isoformat() if r.downloaded_at else None,
-            "has_caption": bool(r.original_caption),
+            "original_caption": r.original_caption,
+            "has_transcript": bool(r.transcript),
+            "content_type_hint": r.content_type_hint,
             "has_local_media": bool(r.local_video_path or r.frame_paths),
+            "thumbnail_url": f"file://{thumb}" if thumb else None,
             "error_message": r.error_message,
-        }
-        for r in rows
-    ]
+        })
+    return result
 
 
 def _reference_folder(item: ReferenceItem) -> Path | None:
@@ -170,6 +174,47 @@ def _reference_folder(item: ReferenceItem) -> Path | None:
     if not candidate:
         return None
     return Path(candidate).resolve().parent
+
+
+def _reference_thumbnail(item: ReferenceItem) -> Path | None:
+    """Immagine rappresentativa della reference per la UI: la prima foto
+    per i caroselli (gia' un file locale reale, zero costo aggiuntivo), un
+    frame estratto e messo in cache su disco per i video — un singolo frame
+    via ffmpeg, non il rilevatore DNN di frame_picker (qui serve solo
+    un'anteprima visiva, non trovare il personaggio). Cache permanente
+    accanto al video: generata una volta sola, i caricamenti successivi
+    della Libreria sono istantanei."""
+    if item.frame_paths:
+        p = Path(item.frame_paths[0])
+        return p if p.exists() else None
+    if not item.local_video_path:
+        return None
+    video_path = Path(item.local_video_path)
+    if not video_path.exists():
+        return None
+    thumb_path = video_path.with_name(video_path.stem + "_thumb.jpg")
+    if thumb_path.exists():
+        return thumb_path
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0.5", "-i", str(video_path), "-frames:v", "1", "-vf", "scale=240:-1", str(thumb_path)],
+            capture_output=True, check=True, timeout=15,
+        )
+    except Exception:
+        return None
+    return thumb_path if thumb_path.exists() else None
+
+
+def _piece_thumbnail(piece: ContentPiece) -> Path | None:
+    """Prima immagine tra gli asset generati di un pezzo (per talking/
+    balletti e' la foto Ruby2, per carosello/stories la prima foto) — sono
+    gia' file locali reali (vedi engine._localize_asset), nessuna
+    generazione aggiuntiva serve qui."""
+    for asset in piece.generated_assets or []:
+        p = Path(asset)
+        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and p.exists():
+            return p
+    return None
 
 
 _ERROR_STATUSES = ("error", "download_error", "private", "unavailable", "transcription_error")
@@ -631,17 +676,36 @@ class Api:
         if plan_id is not None:
             q = q.filter(ContentPiece.plan_week_id == int(plan_id))
         pieces = q.order_by(ContentPiece.updated_at.desc()).limit(int(limit)).all()
-        return {"pieces": [
-            {
+        result = []
+        for p in pieces:
+            thumb = _piece_thumbnail(p)
+            result.append({
                 "id": p.id,
                 "content_type": p.content_type,
                 "status": p.status,
                 "profile_nome": p.profile.nome if p.profile else None,
+                "caption": p.caption,
                 "cost_credits_actual": p.cost_credits_actual,
                 "updated_at": p.updated_at.isoformat() if p.updated_at else None,
-            }
-            for p in pieces
-        ]}
+                "thumbnail_url": f"file://{thumb}" if thumb else None,
+                "has_output": bool(p.generated_assets),
+            })
+        return {"pieces": result}
+
+    @_endpoint
+    def open_piece_folder(self, session, piece_id):
+        piece = session.get(ContentPiece, int(piece_id))
+        if piece is None:
+            return {"ok": False, "error": f"ContentPiece {piece_id} inesistente"}
+        asset = next((a for a in (piece.generated_assets or []) if Path(a).exists()), None)
+        if asset is None:
+            return {"ok": False, "error": "Nessun file locale per questo pezzo"}
+        folder = Path(asset).resolve().parent
+        allowed_roots = [config.DELIVERY_DIR.resolve(), config.WORK_DIR.resolve()]
+        if not any(folder == root or root in folder.parents for root in allowed_roots):
+            return {"ok": False, "error": "Percorso fuori dalle cartelle attese, rifiutato per sicurezza"}
+        subprocess.run(["open", str(folder)], check=False)
+        return {"folder": str(folder)}
 
     @_endpoint
     def piece_timeline(self, session, piece_id):

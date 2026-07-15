@@ -423,12 +423,21 @@ function weeklyTrendRows(trend) {
   }).join('');
 }
 
+function thumbBox(url, fallbackLetter, size) {
+  size = size || 52;
+  if (url) {
+    return `<img src="${esc(url)}" style="width:${size}px;height:${size}px;border-radius:9px;object-fit:cover;flex-shrink:0;background:var(--bg-card-2)" onerror="this.style.display='none'" />`;
+  }
+  return `<div class="p-avatar" style="width:${size}px;height:${size}px;flex-shrink:0">${esc(fallbackLetter || '?')}</div>`;
+}
+
 VIEWS.libreria = async () => {
   const filter = state.libFilter || { status: '', category: '' };
-  const [r, listed, trend] = await Promise.all([
+  const [r, listed, trend, generated] = await Promise.all([
     call('reference_stats'),
     call('list_references', filter.status || null, filter.category || null, 50),
     call('reference_weekly_trend', 8),
+    call('list_content_pieces', null, null, 20),
   ]);
   if (!r.ok) return `<div class="empty">${esc(r.error)}</div>`;
   const statusRows = Object.keys(r.by_status || {}).length
@@ -440,15 +449,6 @@ VIEWS.libreria = async () => {
   const categoryRows = Object.keys(r.by_category || {}).length
     ? Object.entries(r.by_category).map(([s, n]) => `<div class="row" style="padding:5px 0"><span class="muted" style="flex:1">${esc(s)}</span><span class="num">${n}</span></div>`).join('')
     : '<div class="faint">nessuna categoria</div>';
-  const latestRows = (r.latest || []).length
-    ? r.latest.map((x) => `<div class="prow">
-        <div class="p-avatar">${esc((x.source_category || '?')[0])}</div>
-        <div style="min-width:0">
-          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span></div>
-          <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')} ${x.has_caption ? '· caption' : ''}</div>
-        </div>
-      </div>`).join('')
-    : '<div class="empty">Nessun download recente.</div>';
 
   const statusOpts = ['', ...Object.keys(r.by_status || {})].map((s) =>
     `<option value="${esc(s)}" ${filter.status === s ? 'selected' : ''}>${s ? esc(s) : 'Tutti gli stati'}</option>`).join('');
@@ -459,10 +459,12 @@ VIEWS.libreria = async () => {
   const filteredRows = listed.ok && (listed.references || []).length
     ? listed.references.map((x) => `
       <div class="prow">
-        <div class="p-avatar">${esc((x.source_category || '?')[0])}</div>
+        ${thumbBox(x.thumbnail_url, (x.source_category || '?')[0])}
         <div style="min-width:0">
-          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span></div>
-          <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')}${x.has_caption ? ' · caption' : ''}${x.error_message ? ' · ' + esc(x.error_message) : ''}</div>
+          <div class="p-name">${esc(x.source_category || '—')} <span class="badge ${REF_STATUS_BADGE[x.status] || 'gray'}">${esc(x.status)}</span>
+            ${x.content_type_hint === 'video' ? '<span class="badge gray">video</span>' : ''}${x.has_transcript ? '<span class="badge gray">trascrizione</span>' : ''}</div>
+          <div class="faint">${esc(x.week_start || 'senza settimana')} · ${esc(x.source_tab || '—')}${x.error_message ? ' · ' + esc(x.error_message) : ''}</div>
+          ${x.original_caption ? `<div class="faint" style="margin-top:2px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">"${esc(x.original_caption)}"</div>` : ''}
         </div>
         <div class="spacer"></div>
         ${REF_RETRYABLE_STATUSES.includes(x.status) ? `<button class="btn sm" data-action="reference-retry" data-id="${x.id}">Riprova</button>` : ''}
@@ -470,8 +472,23 @@ VIEWS.libreria = async () => {
       </div>`).join('')
     : '<div class="empty">Nessuna reference con questo filtro.</div>';
 
+  const generatedRows = generated.ok && generated.pieces.length
+    ? generated.pieces.map((p) => `
+      <div class="prow">
+        ${thumbBox(p.thumbnail_url, (CT_LABELS[p.content_type] || '?')[0])}
+        <div style="min-width:0">
+          <div class="p-name">${CT_LABELS[p.content_type] || esc(p.content_type)} · #${p.id}
+            <span class="badge ${PIECE_STATUS_BADGE[p.status] || 'gray'}">${PIECE_STATUS_LABELS[p.status] || esc(p.status)}</span></div>
+          <div class="faint">${esc(p.profile_nome || '—')}${p.cost_credits_actual != null ? ' · ' + fmt(p.cost_credits_actual) + ' CR' : ''}</div>
+          ${p.caption ? `<div class="faint" style="margin-top:2px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">"${esc(p.caption)}"</div>` : ''}
+        </div>
+        <div class="spacer"></div>
+        ${p.has_output ? `<button class="btn sm" data-action="piece-open-folder" data-id="${p.id}">Apri cartella</button>` : ''}
+      </div>`).join('')
+    : '<div class="empty">Nessun contenuto generato ancora — vai in Produzione.</div>';
+
   const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>`;
-  return head('Libreria', 'Magazzino operativo delle reference', actions) +
+  return head('Libreria', 'Magazzino operativo delle reference e dei contenuti generati', actions) +
     chipStrip([
       { label: 'Pronte', value: r.ready, color: '#8fe23a' },
       { label: 'Totali', value: r.total, color: '#4c8bf5' },
@@ -487,9 +504,9 @@ VIEWS.libreria = async () => {
     </div>
     <div class="section-title">Andamento (ultime settimane)</div>
     <div class="card">${weeklyTrendRows(trend)}</div>
-    <div class="section-title">Ultimi scaricati</div>
-    <div class="plist">${latestRows}</div>
-    <div class="section-title">Reference (filtrabili, retry/apertura cartella)</div>
+    <div class="section-title">Contenuti generati (ultimi 20)</div>
+    <div class="plist">${generatedRows}</div>
+    <div class="section-title">Reference scaricate (filtrabili)</div>
     <div class="row wrap" style="margin-bottom:12px">
       <select id="libFilterStatus" data-change="lib-filter-status">${statusOpts}</select>
       <select id="libFilterCategory" data-change="lib-filter-category">${categoryOpts}</select>
@@ -726,6 +743,10 @@ const ACTIONS = {
   },
   'reference-open-folder': async (el) => {
     const r = await call('open_reference_folder', Number(el.dataset.id));
+    r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
+  },
+  'piece-open-folder': async (el) => {
+    const r = await call('open_piece_folder', Number(el.dataset.id));
     r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
   },
   'prod-preview': async () => {

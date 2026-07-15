@@ -15,6 +15,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from .. import config
 from ..budget import ledger
 from ..db.models import ContentPiece, PlanWeek, Profile, ReferenceItem
 from ..reference_sync import allocator
@@ -77,6 +78,18 @@ def _log_credit(session: Session, piece: ContentPiece, credits: float, motivo: s
     piece.cost_credits_actual = (piece.cost_credits_actual or 0.0) + abs(credits)
 
 
+def _localize_asset(piece: ContentPiece, url: str, *, kind: str, index: int = 1) -> str:
+    """Scarica in locale un result_url remoto (GAP reale trovato in review,
+    15/07/2026: senza questo, generated_assets teneva solo URL Higgsfield e
+    QA/delivery non funzionavano mai su un asset vero — vedi
+    docs/ai-craft-architecture.md §16). Se `url` non e' un URL http(s)
+    (path locale finto nei test), download_result lo ritorna invariato senza
+    fare rete: nessun test esistente va mockato per questo."""
+    suffix = Path(url.split("?", 1)[0]).suffix or (".jpg" if kind == "image" else ".mp4")
+    dest = config.WORK_DIR / f"piece_{piece.id}" / f"{kind}_{index}{suffix}"
+    return str(higgsfield_client.download_result(url, dest))
+
+
 def _select_source_photos(piece: ContentPiece, reference: Optional[ReferenceItem]) -> list:
     """Foto da ricreare per lo stadio image_regen. Caroselli/stories:
     selezione tra le foto gia' scaricate (carousel_selection.py, fino a 3).
@@ -124,12 +137,12 @@ def _stage_image_regen(session: Session, piece: ContentPiece, reference: Optiona
     )
 
     assets = list(piece.generated_assets or [])
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts, start=1):
         # generate create/get non riportano il costo del job: va richiesto a
         # parte con generate cost, PRIMA di lanciare (verificato 14/07/2026).
         cost = higgsfield_client.estimate_cost(op.job_type, prompt=prompt, **op.params)
         result = higgsfield_client.generate_image(prompt, model=op.job_type, custom_reference_id=char.soul_id, **op.params)
-        assets.append(result.result_url)
+        assets.append(_localize_asset(piece, result.result_url, kind="image", index=index))
         piece.generated_assets = assets
         if cost:
             _log_credit(session, piece, cost, "image_regen")
@@ -145,15 +158,11 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
         # ORIGINALE (non solo la foto Ruby2) come video_references. Vedi
         # docs/ai-craft-architecture.md §12.2.
         #
-        # NON VERIFICATO: passiamo qui lo stesso result_url salvato in
-        # generated_assets (URL remoto sulla CDN Higgsfield) come
-        # image_reference. La documentazione del CLI menziona esplicitamente
-        # "UUID (upload id o job id) o local file path" per i media flag, non
-        # un URL esterno generico — non e' stato confermato che un URL CDN
-        # remoto venga accettato allo stesso modo. Da verificare al prossimo
-        # giro reale; se fallisce, il fix e' passare result.job_id
-        # dell'immagine invece dell'URL (serve un canale per propagare il
-        # job_id tra stadi, oggi non c'e').
+        # image_reference e' ora un path LOCALE (grazie a _localize_asset in
+        # _stage_image_regen, vedi §16), non piu' l'URL CDN remoto: risolve
+        # anche l'incertezza segnalata qui prima (il CLI documenta
+        # esplicitamente "UUID o local file path" per i flag media, non un
+        # URL esterno generico).
         if reference is None or not reference.local_video_path:
             raise RuntimeError("video_balletti richiede il video originale scaricato (reference.local_video_path)")
         try:
@@ -166,7 +175,7 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
             # la riconosce e marca un esito dedicato invece di "error" generico.
             raise
         assets = list(piece.generated_assets or [])
-        assets.append(result.result_url)
+        assets.append(_localize_asset(piece, result.result_url, kind="video"))
         piece.generated_assets = assets
         if op.manual_cost_estimate:
             _log_credit(session, piece, op.manual_cost_estimate, "video_regen (stima non verificata)")
@@ -216,7 +225,7 @@ def _stage_video_regen(session: Session, piece: ContentPiece, reference: Optiona
         video_references=video_references, **call_params,
     )
     assets = list(piece.generated_assets or [])
-    assets.append(result.result_url)
+    assets.append(_localize_asset(piece, result.result_url, kind="video"))
     piece.generated_assets = assets
     if cost:
         _log_credit(session, piece, cost, "video_regen")
@@ -297,6 +306,14 @@ def process_content_piece(session: Session, piece: ContentPiece) -> None:
         logger.info("ContentPiece %s scartato: %s", piece.id, exc)
         session.rollback()
         piece.status = "too_long"
+        session.commit()
+    except claude_creative.ClaudeContentRefusedError as exc:
+        # Idem: rifiuto di policy di Claude (osservato su contenuto
+        # sessualizzato ravvicinato, vedi §12.8/§16), non un errore tecnico
+        # e non recuperabile con un retry sullo stesso input.
+        logger.warning("ContentPiece %s: Claude ha rifiutato il contenuto: %s", piece.id, exc)
+        session.rollback()
+        piece.status = "content_refused"
         session.commit()
     except Exception as exc:
         logger.exception("Errore nello stadio '%s' per ContentPiece %s", piece.status, piece.id)

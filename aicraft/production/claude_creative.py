@@ -51,6 +51,45 @@ class ClaudeCreativeError(RuntimeError):
     pass
 
 
+class ClaudeContentRefusedError(ClaudeCreativeError):
+    """Claude ha rifiutato di generare il prompt per policy di contenuto
+    (osservato la prima volta il 15/07/2026 su una foto ravvicinata
+    sessualizzata di persona reale, vedi docs/ai-craft-architecture.md §12.8
+    e §16). Non e' un errore tecnico e non e' recuperabile con un retry
+    sullo stesso input — stesso principio di HiggsfieldNSFWBlockedError e
+    VideoTooLongError: un esito legittimo, distinto da un fallimento
+    generico, va marcato con uno stato dedicato invece di "error".
+
+    Rilevamento euristico (`_looks_like_refusal`): il CLI headless non
+    espone un modo strutturato per sapere se la risposta e' un rifiuto —
+    si riconosce dal testo, come per "nsfw" negli errori Higgsfield.
+    """
+
+    pass
+
+
+_REFUSAL_PATTERNS = (
+    "i can't help", "i cannot help",
+    "i can't create", "i cannot create",
+    "i can't assist", "i cannot assist",
+    "i can't provide", "i cannot provide",
+    "i can't write", "i cannot write",
+    "i can't generate", "i cannot generate",
+    "i'm not able to", "i am not able to",
+    "i won't be able to", "i will not be able to",
+    "i don't feel comfortable", "i do not feel comfortable",
+    "against my guidelines", "against these guidelines",
+    "i'm not comfortable", "i am not comfortable",
+    "non posso aiutarti", "non posso generare", "non posso creare",
+    "non posso procedere", "non posso scrivere", "mi dispiace, non posso",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in _REFUSAL_PATTERNS)
+
+
 def run_headless(prompt: str, *, allowed_tools: Optional[list] = None, system_prompt: Optional[str] = None) -> str:
     """Esegue `claude -p <prompt>` in modalita' headless, ritorna il testo di risposta."""
     cmd = [config.CLAUDE_CLI_BIN, "-p", prompt, "--output-format", "json"]
@@ -196,6 +235,8 @@ def write_talking_video_prompt(
     )
 
     scene = _strip_markdown_fence(run_headless(prompt, allowed_tools=["Read"]).strip())
+    if _looks_like_refusal(scene):
+        raise ClaudeContentRefusedError(f"Claude ha rifiutato di generare il prompt video: {scene[:300]!r}")
     if not scene:
         raise ClaudeCreativeError("Prompt video talking vuoto")
 
@@ -211,6 +252,8 @@ def write_caption_and_hashtags(*, transcript: str, content_type: str) -> dict:
         f"{CAPTION_HASHTAG_SCHEMA_HINT}. Nessun altro testo, nessun markdown."
     )
     raw = _strip_markdown_fence(run_headless(prompt, allowed_tools=[]).strip())
+    if _looks_like_refusal(raw):
+        raise ClaudeContentRefusedError(f"Claude ha rifiutato di scrivere la caption: {raw[:300]!r}")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -241,6 +284,8 @@ def adapt_original_caption_and_hashtags(*, original_caption: str, transcript: st
         "Nessun altro testo, nessun markdown."
     )
     raw = _strip_markdown_fence(run_headless(prompt, allowed_tools=[]).strip())
+    if _looks_like_refusal(raw):
+        raise ClaudeContentRefusedError(f"Claude ha rifiutato di adattare la caption: {raw[:300]!r}")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -355,6 +400,12 @@ def _generate_scene_descriptions(
             "un elemento per foto, nello stesso ordine dato sopra. Nessun altro testo, nessun markdown."
         )
         raw = _strip_markdown_fence(run_headless(prompt, allowed_tools=["Read"]).strip())
+
+        if _looks_like_refusal(raw):
+            # Rifiuto di policy: non e' un problema di formato, un retry
+            # sullo stesso input darebbe lo stesso rifiuto. Interrompe subito
+            # invece di consumare i retry pensati per errori di formato.
+            raise ClaudeContentRefusedError(f"Claude ha rifiutato di generare il prompt del carosello: {raw[:300]!r}")
 
         try:
             data = json.loads(raw)

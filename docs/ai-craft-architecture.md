@@ -588,3 +588,48 @@ ancora in bozza, pezzi senza reference).
 `test_desktop_api.py` (today_agenda, list_references, retry_reference, open_reference_folder — con
 `subprocess.run` mockato nei test per non aprire davvero Finder). 158 test verdi in tutto il
 progetto.
+
+## 16. Download asset generati + stato dedicato per rifiuti Claude — FATTO (15/07/2026, sessione Claude)
+
+Preparando il primo test reale end-to-end (un talking + un balletto veri, vedi §17), trovato un
+GAP REALE mai emerso prima perché nessun asset Higgsfield vero era mai arrivato al QA: dopo la
+generazione, `generated_assets` teneva SOLO il `result_url` remoto (URL CDN Higgsfield) per tutta
+la pipeline. `qa.check_image`/`check_video` fanno `Path(url).exists()` PRIMA di provare `ffprobe`
+— per un URL questo è SEMPRE `False`, quindi il QA sarebbe fallito su QUALUNQUE asset reale mai
+generato finora. Mai scoperto prima perché tutti i test mockavano `generate_image`/`generate_video`
+restituendo path locali reali (per far funzionare gli assert su file esistenti), mai un vero URL
+remoto arrivato fino al QA.
+
+**Fix**: nuova `higgsfield_client.download_result(url, dest_path)` — se `url` è un URL http(s),
+lo scarica davvero (`requests`, timeout 120s) in `dest_path`; se è già un path locale (caso dei
+test, o di un job che restituisse già un file locale), lo ritorna invariato senza fare rete —
+questo significa che NESSUN test esistente ha dovuto mockare la nuova funzione, hanno continuato a
+passare path locali finti come prima. `engine._localize_asset()` la richiama subito dopo ogni
+`generate_image`/`generate_video`/`generate_motion_control`, salvando in
+`config.WORK_DIR/piece_<id>/` e sostituendo l'URL con il path locale in `generated_assets` — così
+QA e delivery lavorano sempre su file veri. Effetto collaterale positivo: risolve anche
+un'incertezza segnalata in §12.2 (se il CLI Higgsfield accetta un URL remoto per
+`--image-references`/`--start-image` nei job successivi, es. la foto Ruby2 passata a
+`kling3_0_motion_control`) — ora quell'argomento è sempre un path locale vero, coerente con quanto
+il CLI documenta ("UUID o local file path", non un URL esterno).
+
+**Stato dedicato per i rifiuti di contenuto di Claude**: nuova `ClaudeContentRefusedError`
+(sottoclasse di `ClaudeCreativeError`) e `_looks_like_refusal(text)` — rilevamento euristico su
+frasi tipiche di rifiuto ("I can't help", "I'm not able to", "non posso generare", ecc.), stesso
+principio della detection "nsfw" già usata per gli errori Higgsfield: il CLI headless non espone
+un modo strutturato per sapere se una risposta è un rifiuto, si riconosce dal testo. Applicato a
+tutte e 4 le funzioni che chiamano Claude per contenuto strutturato
+(`write_carousel_prompts`/`_generate_scene_descriptions`, `write_talking_video_prompt`,
+`write_caption_and_hashtags`, `adapt_original_caption_and_hashtags`): un rifiuto interrompe SUBITO
+(nessun retry sprecato, un rifiuto è deterministico sullo stesso input, esattamente come un blocco
+NSFW). `engine.process_content_piece` cattura `ClaudeContentRefusedError` e marca
+`piece.status = "content_refused"` invece di `"error"` generico — stesso principio di
+`blocked_nsfw`/`too_long`: un esito legittimo e non recuperabile con un retry, non un fallimento
+tecnico. UI: nuova etichetta "Rifiutato da Claude" (badge rosso).
+
+**Test**: `test_higgsfield_client.py` (nuovo file, `download_result` con path locale/URL
+remoto/errore HTTP), `test_engine.py` (`_stage_image_regen` scarica davvero un URL mockato solo a
+livello di `requests.get`, nuovo test per `content_refused`), `test_claude_creative.py`
+(`_looks_like_refusal`, rifiuto su tutte e 4 le funzioni, verificato che il rifiuto non consuma i
+retry del carosello). 168 test verdi in tutto il progetto. Aggiunto `requests` a
+`requirements.txt` (era una dipendenza transitiva non dichiarata).

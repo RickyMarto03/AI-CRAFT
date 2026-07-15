@@ -6,6 +6,7 @@ docs/ai-craft-architecture.md §7)."""
 
 import datetime as dt
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -98,10 +99,13 @@ def test_process_content_piece_video_talking_end_to_end(session, tmp_path, monke
     image_kwargs = {}
     video_kwargs = {}
 
+    fake_image_path = tmp_path / "ruby2_image.png"
+    fake_image_path.write_bytes(b"finta immagine")
+
     def fake_generate_image(prompt, **kwargs):
         calls["image"] += 1
         image_kwargs.update(kwargs)
-        return GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/img.png", cost_credits=None, raw={})
+        return GenerationResult(job_id="img-1", status="completed", result_url=str(fake_image_path), cost_credits=None, raw={})
 
     def fake_generate_video(prompt, **kwargs):
         calls["video"] += 1
@@ -162,6 +166,32 @@ def test_process_content_piece_qa_fallito_marca_errore(session, monkeypatch):
     engine_module.process_content_piece(session, piece)
 
     assert piece.status == "error"
+
+
+def test_process_content_piece_claude_rifiuta_marca_content_refused(session, tmp_path, monkeypatch):
+    """Quando Claude rifiuta di scrivere il prompt (policy di contenuto), il
+    pezzo va marcato con uno stato dedicato invece di "error" generico —
+    esito legittimo e non recuperabile con un retry, stesso principio di
+    blocked_nsfw/too_long. Vedi docs/ai-craft-architecture.md §16."""
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    frame_paths = [str(tmp_path / "foto_0.jpg")]
+    reference = ReferenceItem(
+        source_url="https://www.instagram.com/p/REFUSED/",
+        status="ready", frame_paths=frame_paths, source_category="GENERAL",
+    )
+    piece = ContentPiece(profile=profile, reference=reference, content_type="carosello", status="reference_ready")
+    session.add_all([creator, profile, reference, piece])
+    session.commit()
+
+    def fake_write_carousel_prompts(**kwargs):
+        raise engine_module.claude_creative.ClaudeContentRefusedError("rifiuto simulato")
+
+    monkeypatch.setattr(engine_module.claude_creative, "write_carousel_prompts", fake_write_carousel_prompts)
+
+    engine_module.process_content_piece(session, piece)
+
+    assert piece.status == "content_refused"
 
 
 def test_process_content_piece_tipo_sconosciuto_marca_errore(session):
@@ -232,10 +262,12 @@ def test_video_balletti_usa_motion_control_con_video_originale(session, tmp_path
         engine_module.claude_creative, "write_caption_and_hashtags",
         lambda **kwargs: {"caption": "c", "hashtags": []},
     )
+    fake_ruby2_image = tmp_path / "ruby2.png"
+    fake_ruby2_image.write_bytes(b"finta immagine")
     monkeypatch.setattr(engine_module.higgsfield_client, "estimate_cost", lambda job_type, **kw: 0.12)
     monkeypatch.setattr(
         engine_module.higgsfield_client, "generate_image",
-        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/ruby2.png", cost_credits=None, raw={}),
+        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url=str(fake_ruby2_image), cost_credits=None, raw={}),
     )
 
     calls = {}
@@ -251,7 +283,7 @@ def test_video_balletti_usa_motion_control_con_video_originale(session, tmp_path
 
     assert piece.status == "delivered"
     assert calls["video_reference"] == str(original_video)  # il video ORIGINALE, non quello generato
-    assert calls["image_reference"] == "https://cdn.example/ruby2.png"  # la foto Ruby2 appena generata
+    assert calls["image_reference"] == str(fake_ruby2_image)  # la foto Ruby2 appena generata (locale, non URL remoto)
     # 0.12 (image_regen, mockato) + 16.0 (video_regen, manual_cost_estimate)
     assert piece.cost_credits_actual == pytest.approx(16.12)
 
@@ -273,11 +305,13 @@ def test_video_balletti_bloccato_nsfw_marca_stato_dedicato(session, tmp_path, mo
         engine_module.frame_picker, "pick_reference_frame",
         lambda video_path, output_path, **kw: engine_module.frame_picker.FramePick(frame_path=tmp_path / "frame.jpg", timestamp_sec=0.0, method="fallback"),
     )
+    fake_ruby2_image = tmp_path / "ruby2.png"
+    fake_ruby2_image.write_bytes(b"finta immagine")
     monkeypatch.setattr(engine_module.claude_creative, "write_carousel_prompts", lambda **kwargs: ["prompt"])
     monkeypatch.setattr(engine_module.higgsfield_client, "estimate_cost", lambda job_type, **kw: 0.12)
     monkeypatch.setattr(
         engine_module.higgsfield_client, "generate_image",
-        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/ruby2.png", cost_credits=None, raw={}),
+        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url=str(fake_ruby2_image), cost_credits=None, raw={}),
     )
 
     def fake_motion_control(image_reference, video_reference, **kw):
@@ -338,9 +372,11 @@ def test_video_entro_soglia_procede_normalmente(session, tmp_path, monkeypatch):
     monkeypatch.setattr(engine_module.claude_creative, "write_talking_video_prompt", lambda **kw: "prompt")
     monkeypatch.setattr(engine_module.claude_creative, "write_caption_and_hashtags", lambda **kw: {"caption": "c", "hashtags": []})
     monkeypatch.setattr(engine_module.higgsfield_client, "estimate_cost", lambda job_type, **kw: 0.12)
+    fake_image_path = tmp_path / "img.png"
+    fake_image_path.write_bytes(b"finta immagine")
     monkeypatch.setattr(
         engine_module.higgsfield_client, "generate_image",
-        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/img.png", cost_credits=None, raw={}),
+        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url=str(fake_image_path), cost_credits=None, raw={}),
     )
     monkeypatch.setattr(
         engine_module.higgsfield_client, "generate_video",
@@ -390,9 +426,11 @@ def test_video_talking_usa_video_reference_se_flag_attivo(session, tmp_path, mon
     monkeypatch.setattr(engine_module.claude_creative, "write_talking_video_prompt", fake_write_talking_video_prompt)
     monkeypatch.setattr(engine_module.claude_creative, "write_caption_and_hashtags", lambda **kw: {"caption": "c", "hashtags": []})
     monkeypatch.setattr(engine_module.higgsfield_client, "estimate_cost", lambda job_type, **kw: 0.12)
+    fake_image_path = tmp_path / "img.png"
+    fake_image_path.write_bytes(b"finta immagine")
     monkeypatch.setattr(
         engine_module.higgsfield_client, "generate_image",
-        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/img.png", cost_credits=None, raw={}),
+        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url=str(fake_image_path), cost_credits=None, raw={}),
     )
 
     video_kwargs = {}
@@ -408,7 +446,7 @@ def test_video_talking_usa_video_reference_se_flag_attivo(session, tmp_path, mon
     assert piece.status == "delivered"
     assert seen_use_video_reference["value"] is True
     assert video_kwargs.get("video_references") == [str(short_video)]  # movimento
-    assert video_kwargs.get("start_image") == "https://cdn.example/img.png"  # identita': sempre dalla foto Ruby2
+    assert video_kwargs.get("start_image") == str(fake_image_path)  # identita': sempre dalla foto Ruby2 (locale)
 
 
 def test_carosello_usa_carousel_selection_e_genera_una_foto_per_prompt(session, tmp_path, monkeypatch):
@@ -446,7 +484,9 @@ def test_carosello_usa_carousel_selection_e_genera_una_foto_per_prompt(session, 
 
     def fake_generate_image(prompt, **kw):
         image_calls.append((prompt, kw.get("custom_reference_id"), kw.get("aspect_ratio")))
-        return GenerationResult(job_id=f"img-{len(image_calls)}", status="completed", result_url=f"https://cdn.example/{len(image_calls)}.png", cost_credits=None, raw={})
+        fake_path = tmp_path / f"generated_{len(image_calls)}.png"
+        fake_path.write_bytes(b"finta immagine")
+        return GenerationResult(job_id=f"img-{len(image_calls)}", status="completed", result_url=str(fake_path), cost_credits=None, raw={})
 
     monkeypatch.setattr(engine_module.higgsfield_client, "generate_image", fake_generate_image)
 
@@ -463,6 +503,48 @@ def test_carosello_usa_carousel_selection_e_genera_una_foto_per_prompt(session, 
     assert all(ref == "0698f81f-1d26-47bb-b31b-9391aeadb144" for _, ref, _ in image_calls)  # soul_id di Ruby2
     assert all(ar == "1:1" for _, _, ar in image_calls)  # carosello: quadrato, deciso con l'utente
     assert piece.cost_credits_actual == pytest.approx(0.36)  # 0.12 x 3
+
+
+def test_stage_image_regen_scarica_asset_remoto_in_locale(session, tmp_path, monkeypatch):
+    """_localize_asset deve scaricare un vero URL remoto restituito da
+    Higgsfield invece di lasciarlo com'e' in generated_assets — altrimenti
+    QA/delivery non funzionano mai su un asset reale (gap trovato in review,
+    15/07/2026, vedi docs §16). Qui si mocka solo requests.get, non
+    _localize_asset: verifica l'integrazione vera."""
+    creator = Creator(nome="Ruby")
+    profile = Profile(creator=creator, nome="Ruby Wilde", tipo_contenuto="misto")
+    frame_paths = [str(tmp_path / "foto_0.jpg")]
+    reference = ReferenceItem(
+        source_url="https://www.instagram.com/p/DOWNLOADTEST/",
+        status="ready", frame_paths=frame_paths, source_category="GENERAL",
+    )
+    piece = ContentPiece(profile=profile, reference=reference, content_type="carosello", status="reference_ready")
+    session.add_all([creator, profile, reference, piece])
+    session.commit()
+
+    monkeypatch.setattr(engine_module.config, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(engine_module.claude_creative, "write_carousel_prompts", lambda **kw: ["prompt"])
+    monkeypatch.setattr(engine_module.higgsfield_client, "estimate_cost", lambda job_type, **kw: 0.12)
+    monkeypatch.setattr(
+        engine_module.higgsfield_client, "generate_image",
+        lambda prompt, **kw: GenerationResult(job_id="img-1", status="completed", result_url="https://cdn.example/real.png", cost_credits=None, raw={}),
+    )
+
+    class FakeResponse:
+        content = b"bytes immagine finta"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(engine_module.higgsfield_client.requests, "get", lambda url, timeout=None: FakeResponse())
+
+    engine_module._stage_image_regen(session, piece, reference, profile)
+
+    assert len(piece.generated_assets) == 1
+    saved_path = Path(piece.generated_assets[0])
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"bytes immagine finta"
+    assert str(saved_path).startswith(str(tmp_path / "work"))
 
 
 def test_run_once_produce_solo_piani_approvati(session, monkeypatch):

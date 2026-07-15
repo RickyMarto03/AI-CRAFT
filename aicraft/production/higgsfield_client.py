@@ -21,7 +21,10 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+import requests
 
 from .. import config
 
@@ -215,6 +218,31 @@ def generate_motion_control(
         if "nsfw" in str(exc).lower():
             raise HiggsfieldNSFWBlockedError(str(exc)) from exc
         raise
+
+
+def download_result(url: str, dest_path: Path) -> Path:
+    """Scarica in locale un `result_url` di un job Higgsfield (URL CDN
+    remoto). GAP REALE trovato in review (15/07/2026): prima di questo fix,
+    `generated_assets` teneva SOLO l'URL remoto per tutta la pipeline —
+    `qa.check_image`/`check_video` fanno `Path(url).exists()` che per un URL
+    e' SEMPRE False, quindi il QA sarebbe fallito su qualunque asset reale
+    mai generato finora (mai emerso perche' nessun test/uso reale era mai
+    arrivato fino a un QA su un asset Higgsfield vero — vedi
+    docs/ai-craft-architecture.md §16).
+
+    Se `url` NON e' un URL http(s) (es. un path locale, usato nei test o in
+    scenari futuri in cui un job restituisse gia' un file locale), ritorna
+    il path cosi' com'e' senza fare alcuna richiesta di rete — cosi' i test
+    esistenti che passano path locali finti come "result_url" continuano a
+    funzionare senza dover mockare anche questa funzione.
+    """
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return Path(url)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    resp = requests.get(url, timeout=120)
+    resp.raise_for_status()
+    dest_path.write_bytes(resp.content)
+    return dest_path
 
 
 def get_job(job_id: str) -> GenerationResult:

@@ -26,10 +26,12 @@ const PIECE_STATUS_LABELS = {
   reference_ready: 'Da produrre', image_regen: 'Foto in corso', video_regen: 'Video in corso',
   qa: 'QA in corso', caption_hashtag: 'Caption in corso', delivered: 'Consegnato',
   error: 'Errore', blocked_nsfw: 'Bloccato (NSFW)', too_long: 'Video troppo lungo',
+  content_refused: 'Rifiutato da Claude',
 };
 const PIECE_STATUS_BADGE = {
   reference_ready: 'gray', image_regen: 'amber', video_regen: 'amber', qa: 'amber',
   caption_hashtag: 'amber', delivered: 'green', error: 'red', blocked_nsfw: 'red', too_long: 'red',
+  content_refused: 'red',
 };
 const REF_STATUS_BADGE = {
   ready: 'green', pending: 'gray', downloading: 'amber', transcribing: 'amber',

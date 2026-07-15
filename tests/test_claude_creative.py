@@ -270,3 +270,56 @@ def test_adapt_original_caption_and_hashtags_parsa_json(monkeypatch):
     assert result == {"caption": "Nuova caption", "hashtags": ["#fit", "#ig"]}
     assert "Caption originale #fit" in seen["prompt"]
     assert "non inventare" in seen["prompt"]
+
+
+# ---- rifiuti di contenuto (ClaudeContentRefusedError) ----
+
+def test_looks_like_refusal_riconosce_frasi_tipiche():
+    assert claude_creative._looks_like_refusal("I can't help with that request.")
+    assert claude_creative._looks_like_refusal("I'm not able to create this image.")
+    assert claude_creative._looks_like_refusal("Mi dispiace, non posso generare questo contenuto.")
+    assert not claude_creative._looks_like_refusal('{"scenes": ["outfit rosa, posa..."]}')
+
+
+def test_write_carousel_prompts_rifiuto_solleva_content_refused_senza_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_run_headless(prompt, **kw):
+        calls["n"] += 1
+        return "I can't help with that request, it involves a real person in a sexualized context."
+
+    monkeypatch.setattr(claude_creative, "run_headless", fake_run_headless)
+
+    with pytest.raises(claude_creative.ClaudeContentRefusedError):
+        claude_creative.write_carousel_prompts(photo_paths=["a.jpg"], character=_CHAR, content_type="carosello")
+
+    assert calls["n"] == 1  # nessun retry sprecato: il rifiuto e' deterministico
+
+
+def test_write_talking_video_prompt_rifiuto_solleva_content_refused(monkeypatch):
+    monkeypatch.setattr(
+        claude_creative, "run_headless",
+        lambda prompt, **kw: "I cannot create this content as it depicts a real person inappropriately.",
+    )
+
+    with pytest.raises(claude_creative.ClaudeContentRefusedError):
+        claude_creative.write_talking_video_prompt(
+            frames=[_FRAME], transcript="ciao", character=_CHAR, content_type="video_talking",
+            source_category="TALKING", duration_seconds=5.0, use_video_reference=False,
+        )
+
+
+def test_write_caption_and_hashtags_rifiuto_solleva_content_refused(monkeypatch):
+    monkeypatch.setattr(claude_creative, "run_headless", lambda prompt, **kw: "I can't assist with that.")
+
+    with pytest.raises(claude_creative.ClaudeContentRefusedError):
+        claude_creative.write_caption_and_hashtags(transcript="ciao", content_type="video_talking")
+
+
+def test_adapt_original_caption_rifiuto_solleva_content_refused(monkeypatch):
+    monkeypatch.setattr(claude_creative, "run_headless", lambda prompt, **kw: "I can't provide that.")
+
+    with pytest.raises(claude_creative.ClaudeContentRefusedError):
+        claude_creative.adapt_original_caption_and_hashtags(
+            original_caption="caption originale", transcript="ciao", content_type="video_talking",
+        )

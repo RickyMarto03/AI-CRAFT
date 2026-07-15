@@ -87,6 +87,15 @@ async function refreshTopProfileSwitch() {
 /* ============ Router ============ */
 const VIEWS = {};
 async function setView(name) {
+  // Se si ri-renderizza la STESSA vista (es. dopo un'azione come retry/refresh),
+  // mantiene la posizione di scroll invece di tornare in cima — il placeholder
+  // "Carico…" sotto e' piu' corto del contenuto reale e altrimenti farebbe
+  // collassare temporaneamente l'altezza scrollabile, resettando lo scroll.
+  // Cambiando invece tab (vista diversa) si riparte dall'alto, comportamento atteso.
+  const sameView = name === state.view;
+  const mainEl = document.querySelector('.main');
+  const scrollTop = sameView && mainEl ? mainEl.scrollTop : 0;
+
   state.view = name;
   document.querySelectorAll('.tab').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
   const root = $('#view');
@@ -96,6 +105,7 @@ async function setView(name) {
   } catch (e) {
     root.innerHTML = `<div class="empty">Errore nel caricamento: ${esc(e)}</div>`;
   }
+  if (mainEl) mainEl.scrollTop = scrollTop;
 }
 
 function head(title, sub, actions = '') {
@@ -409,18 +419,33 @@ VIEWS.produzione = async () => {
 /* ============ Vista: Libreria ============ */
 function weeklyTrendRows(trend) {
   if (!trend || !trend.ok || !trend.weeks.length) return '<div class="empty">Nessun dato per settimana.</div>';
-  return trend.weeks.map((w) => {
+  const legend = `<div class="row wrap" style="margin-bottom:16px;gap:16px">
+    <span class="row" style="gap:6px"><span style="width:9px;height:9px;border-radius:50%;background:var(--green);display:inline-block"></span><span class="faint">Pronte</span></span>
+    <span class="row" style="gap:6px"><span style="width:9px;height:9px;border-radius:50%;background:var(--red);display:inline-block"></span><span class="faint">Errore</span></span>
+    <span class="row" style="gap:6px"><span style="width:9px;height:9px;border-radius:50%;background:var(--amber);display:inline-block"></span><span class="faint">In attesa</span></span>
+  </div>`;
+  const rows = trend.weeks.map((w) => {
     const total = Math.max(1, w.total);
     const pct = (n) => (n / total * 100).toFixed(1) + '%';
-    return `<div style="margin-bottom:10px">
-      <div class="row" style="margin-bottom:4px"><span class="faint">${esc(w.week_start)}</span><div class="spacer"></div><span class="num faint">${w.total} totali</span></div>
-      <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--bg-card-2)">
-        <div style="width:${pct(w.ready)};background:var(--green)" title="${w.ready} pronte"></div>
-        <div style="width:${pct(w.error)};background:var(--red)" title="${w.error} errore"></div>
-        <div style="width:${pct(w.pending)};background:var(--amber)" title="${w.pending} in attesa"></div>
+    return `<div style="margin-bottom:16px">
+      <div class="row" style="margin-bottom:6px">
+        <span class="muted" style="font-weight:700">Sett. ${esc(prettyDate(w.week_start))}</span>
+        <div class="spacer"></div>
+        <span class="num" style="color:var(--green)">${w.ready} pronte</span>
+        <span class="faint" style="margin:0 6px">·</span>
+        <span class="num" style="color:var(--red)">${w.error} errore</span>
+        <span class="faint" style="margin:0 6px">·</span>
+        <span class="num" style="color:var(--amber)">${w.pending} attesa</span>
+        <span class="faint" style="margin-left:10px">(${w.total} totali)</span>
+      </div>
+      <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--bg-card-2)">
+        <div style="width:${pct(w.ready)};background:var(--green)"></div>
+        <div style="width:${pct(w.error)};background:var(--red)"></div>
+        <div style="width:${pct(w.pending)};background:var(--amber)"></div>
       </div>
     </div>`;
   }).join('');
+  return legend + rows;
 }
 
 function thumbBox(url, fallbackLetter, size) {
@@ -487,7 +512,8 @@ VIEWS.libreria = async () => {
       </div>`).join('')
     : '<div class="empty">Nessun contenuto generato ancora — vai in Produzione.</div>';
 
-  const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>`;
+  const actions = `<button class="btn primary" data-action="references-sync">Aggiorna libreria</button>
+    ${r.error ? `<button class="btn danger" data-action="reference-retry-all">Riprova tutti (${r.error})</button>` : ''}`;
   return head('Libreria', 'Magazzino operativo delle reference e dei contenuti generati', actions) +
     chipStrip([
       { label: 'Pronte', value: r.ready, color: '#8fe23a' },
@@ -741,6 +767,21 @@ const ACTIONS = {
     const r = await call('retry_reference', id);
     if (r.ok) { toast('Nuovo stato: ' + r.retry.status); setView('libreria'); } else toast(r.error, 'err');
   },
+  'reference-retry-all': async (el) => {
+    if (retryAllBusy) return;
+    const ok = confirm('Ritenta tutte le reference fallite: puo\' richiedere qualche minuto (stesso rate-limit dei download singoli). Continuare?');
+    if (!ok) return;
+    retryAllBusy = true;
+    el.disabled = true;
+    toast('Riprovo tutte le reference fallite…');
+    const r = await call('retry_all_references');
+    retryAllBusy = false;
+    if (r.ok) {
+      const s = r.retry_all;
+      toast(`Fatto: ${s.ready}/${s.total} tornate pronte, ${s.still_failed} ancora fallite`);
+      setView('libreria');
+    } else toast(r.error, 'err');
+  },
   'reference-open-folder': async (el) => {
     const r = await call('open_reference_folder', Number(el.dataset.id));
     r.ok ? toast('Cartella aperta') : toast(r.error, 'err');
@@ -786,6 +827,7 @@ const ACTIONS = {
 };
 
 let stepBusy = false;
+let retryAllBusy = false;
 async function stepCell(ct, day, delta) {
   if (stepBusy || !state.currentPlan) return;
   stepBusy = true;

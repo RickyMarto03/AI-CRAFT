@@ -508,6 +508,19 @@ class Api:
         return {"retry": result}
 
     @_endpoint
+    def retry_all_references(self, session, category=None):
+        # _ERROR_STATUSES, non sync.RETRYABLE_STATUSES: deve ritentare
+        # esattamente le reference che in Libreria mostrano gia' il bottone
+        # "Riprova" singolo (falliti), non anche i "pending"/"downloading"
+        # ancora mai processati — quelli li gestisce il sync normale.
+        q = session.query(ReferenceItem).filter(ReferenceItem.status.in_(_ERROR_STATUSES))
+        if category:
+            q = q.filter(ReferenceItem.source_category == category)
+        ids = [r.id for r in q.all()]
+        result = reference_sync.retry_all(ids)
+        return {"retry_all": result}
+
+    @_endpoint
     def open_reference_folder(self, session, reference_id):
         item = session.get(ReferenceItem, int(reference_id))
         if item is None:

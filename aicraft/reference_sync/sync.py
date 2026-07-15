@@ -297,6 +297,24 @@ def retry_reference(reference_id: int) -> dict:
         return {"id": item.id, "status": item.status, "error_message": item.error_message}
 
 
+def retry_all(reference_ids: list) -> dict:
+    """Riprova in sequenza una lista di reference (stesso `retry_reference`
+    per ciascuna, quindi stesso rate-limit del download singolo — nessun
+    trucco per andare piu' veloci, per non rischiare di farci bloccare da
+    Instagram). Pensata per il bottone "Riprova tutti" della Libreria: la
+    lista di ID da ritentare la decide il chiamante (es. tutte quelle in
+    uno stato ritentabile, eventualmente filtrate per categoria)."""
+    ready = 0
+    still_failed = 0
+    for reference_id in reference_ids:
+        result = retry_reference(reference_id)
+        if result["status"] == "ready":
+            ready += 1
+        else:
+            still_failed += 1
+    return {"total": len(reference_ids), "ready": ready, "still_failed": still_failed}
+
+
 def run_once(
     year: int | None = None,
     *,

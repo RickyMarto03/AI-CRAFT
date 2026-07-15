@@ -447,6 +447,43 @@ def test_retry_reference_chiama_reference_sync(api, monkeypatch):
     assert r["retry"]["status"] == "ready"
 
 
+def test_retry_all_references_seleziona_solo_stati_ritentabili(api, monkeypatch):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="download_error", category="TALKING"),
+            _seed_reference(status="unavailable", category="BOOBS"),
+            _seed_reference(status="ready", category="BOOTY"),  # non ritentabile, va escluso
+            _seed_reference(status="pending", category="GENERAL"),  # non ritentabile (lo gestisce il sync), va escluso
+        ])
+        session.commit()
+
+    seen_ids = []
+    monkeypatch.setattr(api_mod.reference_sync, "retry_all", lambda ids: (seen_ids.extend(ids), {"total": len(ids), "ready": len(ids), "still_failed": 0})[1])
+
+    r = api.retry_all_references()
+
+    assert r["ok"]
+    assert len(seen_ids) == 2
+    assert r["retry_all"]["total"] == 2
+
+
+def test_retry_all_references_filtra_per_categoria(api, monkeypatch):
+    with api_mod.SessionLocal() as session:
+        session.add_all([
+            _seed_reference(status="download_error", category="TALKING"),
+            _seed_reference(status="download_error", category="BOOBS"),
+        ])
+        session.commit()
+
+    seen_ids = []
+    monkeypatch.setattr(api_mod.reference_sync, "retry_all", lambda ids: (seen_ids.extend(ids), {"total": len(ids), "ready": 0, "still_failed": 0})[1])
+
+    r = api.retry_all_references(category="TALKING")
+
+    assert r["ok"]
+    assert len(seen_ids) == 1
+
+
 def test_open_reference_folder_reference_inesistente(api):
     r = api.open_reference_folder(999)
     assert r["ok"] is False

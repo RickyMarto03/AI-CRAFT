@@ -163,3 +163,37 @@ def test_retry_reference_id_inesistente_solleva_errore(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError):
         sync.retry_reference(999)
+
+
+def test_retry_all_ritenta_in_sequenza_e_conta_esiti(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry3.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    with TestSession() as session:
+        a = ReferenceItem(source_url="https://www.instagram.com/p/A/", status="download_error")
+        b = ReferenceItem(source_url="https://www.instagram.com/p/B/", status="download_error")
+        session.add_all([a, b])
+        session.commit()
+        id_a, id_b = a.id, b.id
+
+    seen_ids = []
+
+    def fake_process_item(session, item, **kw):
+        seen_ids.append(item.id)
+        item.status = "ready" if item.id == id_a else "download_error"
+
+    monkeypatch.setattr(sync, "process_item", fake_process_item)
+
+    result = sync.retry_all([id_a, id_b])
+
+    assert seen_ids == [id_a, id_b]  # ordine rispettato, stesso rate-limit del retry singolo
+    assert result == {"total": 2, "ready": 1, "still_failed": 1}
+
+
+def test_retry_all_lista_vuota_non_esplode(monkeypatch, tmp_path):
+    TestSession = _isolated_session_factory(tmp_path, "retry4.db")
+    monkeypatch.setattr(sync, "SessionLocal", TestSession)
+    monkeypatch.setattr(sync, "init_db", lambda: None)
+
+    assert sync.retry_all([]) == {"total": 0, "ready": 0, "still_failed": 0}

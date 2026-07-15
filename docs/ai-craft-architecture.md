@@ -789,3 +789,29 @@ su Instagram (permanente). Nessun credito Higgsfield speso (solo download + tras
 skip se ffmpeg non disponibile, verificata anche la cache al secondo giro), thumbnail sui
 contenuti generati, `open_piece_folder` (inesistente/senza output/successo con percorso dentro
 `DELIVERY_DIR` verificato/mock di `subprocess.run`). 187 test verdi in tutto il progetto.
+
+## 23. Riprova tutti, andamento piu' leggibile, fix scroll — FATTO (15/07/2026, sessione Claude)
+
+Tre rifiniture puntuali su feedback dell'utente dopo il redesign Libreria.
+
+- **`sync.retry_all(reference_ids)`**: ritenta in sequenza una lista di reference — stesso
+  `retry_reference` per ciascuna, quindi stesso rate-limit del download singolo (nessun trucco per
+  velocizzare, per non rischiare un blocco Instagram). Endpoint `retry_all_references(category?)`
+  seleziona le reference in uno stato "errore" (`_ERROR_STATUSES`, le stesse che mostrano già il
+  bottone "Riprova" singolo — non anche `pending`/`downloading`, quelle le gestisce il sync
+  normale). Bottone "Riprova tutti (N)" in Libreria, con guardia anti-doppio-click
+  (`retryAllBusy`) e conferma esplicita visto che può richiedere qualche minuto.
+- **Grafico "Andamento" riscritto**: prima erano solo barre colorate con i numeri nascosti in un
+  tooltip hover (poco scopribile in un'app desktop). Ora legenda esplicita in cima e conteggi
+  scritti come testo sopra ogni barra (pronte/errore/attesa/totali), la barra resta solo come
+  indicatore visivo proporzionale, non l'unica fonte del dato.
+- **Fix scroll che tornava in cima**: `setView()` sostituiva `innerHTML` passando prima per un
+  placeholder "Carico…" molto più corto del contenuto reale — questo faceva collassare
+  temporaneamente l'altezza scrollabile di `.main`, resettando lo scroll, che poi restava in cima
+  anche a contenuto ricaricato. Fix: cattura `scrollTop` prima del re-render SOLO quando si
+  ridisegna la STESSA vista (es. dopo un'azione come retry/refresh), lo ripristina dopo — cambiare
+  tab invece riparte dall'alto come atteso.
+
+**Test**: `test_reference_sync.py` (`retry_all` rispetta l'ordine e conta gli esiti, lista vuota
+non esplode), `test_desktop_api.py` (`retry_all_references` filtra per stato ritentabile e per
+categoria). 191 test verdi in tutto il progetto.

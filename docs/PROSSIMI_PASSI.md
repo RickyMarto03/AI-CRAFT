@@ -86,6 +86,20 @@ generati non venivano mai scaricati in locale, solo l'URL Higgsfield restava in 
 
 ## Log sessioni (piu' recente in cima — AGGIUNGERE una voce nuova, non sovrascrivere le altre)
 
+### 15/07/2026 notte, parte 2 (sessione Claude — riprova tutti, andamento, fix scroll)
+
+- `sync.retry_all` + endpoint `retry_all_references` (filtra `_ERROR_STATUSES`, opzionale
+  categoria) + bottone "Riprova tutti (N)" in Libreria con guardia anti-doppio-click e conferma.
+- Grafico "Andamento" riscritto con legenda esplicita e conteggi in testo (prima solo tooltip
+  hover poco scopribile).
+- Fix scroll-to-top indesiderato: `setView()` ora preserva `scrollTop` di `.main` quando
+  ri-renderizza la STESSA vista (dopo un'azione), lo resetta solo cambiando tab.
+- 191 test verdi. Vedi doc §23.
+- Suggerite ma NON implementate (proposte all'utente, in attesa di conferma): ricerca testuale in
+  Libreria, paginazione oltre i 50 risultati, retry automatico nello scheduler settimanale per i
+  `download_error` vecchi, indicatore "produzione in corso" quando si cambia tab durante un
+  `production_run` lungo.
+
 ### 15/07/2026 notte (sessione Claude — sync massivo + redesign Libreria)
 
 - **Confermato dall'utente**: il workflow caroselli+talking (§17) è "perfetto" sui 2 output reali
